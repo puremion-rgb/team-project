@@ -26,6 +26,17 @@ export type Cafe = {
    * "24시간"). amenities는 그중 아이콘이 있는 몇 개(wifi/outlet/parking/pet)만
    * 골라낸 값이라, 사장님이 직접 붙인 커스텀 태그까지 보여주려면 이 필드를 써요. */
   tags?: string[];
+  /** 매장 소개글(사장님이 매장 프로필에서 작성). 없으면 화면에서 그 영역을
+   * 아예 숨겨요. */
+  description?: string | null;
+  /** 요일별 영업시간 전체(오늘 요일만 보여주는 hours와 달리, "영업시간 더보기"를
+   * 눌렀을 때 전체 요일을 보여주는 데 써요). */
+  businessHours?: {
+    day_of_week: number;
+    is_closed?: boolean;
+    opening_time?: string | null;
+    closing_time?: string | null;
+  }[];
 };
 
 export const cafes: Cafe[] = [

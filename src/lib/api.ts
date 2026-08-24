@@ -16,8 +16,35 @@ import type { SalesPoint } from "@/lib/owner-store";
  * - 이 파일의 모든 함수는 실패해도 절대 예외를 던지지 않고(내부에서 잡아서)
  *   null / 기본값을 돌려줘요. 그래야 호출하는 쪽 store들이 항상 기존 화면을
  *   유지한 채로 동작할 수 있어요 (백엔드 미기동·네트워크 오류에도 화면이 안 깨짐).
+ *
+ * ⚠️ 운영 배포 안내 문서(CafeON_프론트엔드_운영_배포_안내.docx)에 "핵심 원칙:
+ * API 기본 주소에 /api가 이미 포함되어 있으므로 개별 요청 경로에는 /api를
+ * 다시 붙이지 않는다"고 돼 있어요. 그런데 이 프로젝트의 모든 요청 함수는
+ * apiFetch("/api/...")처럼 각 경로 앞에 이미 /api를 붙이고 있어요(파일 전체에
+ * 일관되게 이렇게 돼 있어서, 요청 경로 쪽을 바꾸는 대신 base URL 쪽을 맞춰요).
+ * 그 문서대로 NEXT_PUBLIC_API_BASE_URL에 https://wa26b01.yjjob.kr/api 처럼
+ * /api까지 포함해서 넣으면, 실제 요청 주소가 …/api/api/users/me 처럼 겹쳐서
+ * 전부 404가 나요 — 로그인 여부 확인, 매장/메뉴 조회 등 백엔드를 부르는 모든
+ * 기능이 조용히 실패해요(이 파일의 함수들은 실패를 삼키고 null을 돌려주도록
+ * 설계돼 있어서 화면이 깨지는 대신 "안 되는 상태"로 조용히 남아요 — 로그아웃
+ * 후에도 사장님 로그인 버튼이 안 보이거나 새로고침 후 사라지는 것도 이렇게
+ * 배경 요청이 계속 실패하면서 상태 판단이 꼬여 생길 수 있는 증상 중 하나예요).
+ * 아래에서 실수로 붙어 들어온 뒤쪽 /api를 한 번 더 방어적으로 제거해서, 문서의
+ * 값을 그대로 넣어도(예: https://wa26b01.yjjob.kr/api) 이중 /api가 되지
+ * 않게 해요.
+ *
+ * ⚠️ 또 하나 중요: 이 프로젝트는 Next.js라서 환경변수 이름이 NEXT_PUBLIC_로
+ * 시작해야 브라우저 코드에 포함돼요. 운영 배포 안내 문서는 VITE_API_BASE_URL을
+ * 쓰라고 안내하는데, 그건 Vite 프로젝트용 접두어라 Next.js에서는 아예 읽히지
+ * 않아요(값이 없는 것과 같아서 isApiConfigured()가 false가 되고, 로그인·매장
+ * 조회 등 모든 API 연동이 꺼진 채로 배포돼요). 운영 배포 시에는 반드시
+ * NEXT_PUBLIC_API_BASE_URL 이름으로 값을 넣고, **빌드 전에** 설정한 뒤
+ * npm run build를 실행해야 해요(Next.js는 NEXT_PUBLIC_ 값을 빌드 시점에
+ * 결과물 안에 그대로 굳혀 넣기 때문에, 빌드가 끝난 뒤 서버에서 환경변수만
+ * 바꿔치기해서는 반영되지 않아요).
  */
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+const API_BASE_URL = RAW_API_BASE_URL.replace(/\/+$/, "").replace(/\/api$/i, "");
 
 export function isApiConfigured() {
   return API_BASE_URL.length > 0;
@@ -137,6 +164,11 @@ type AuthAs = "customer" | "owner" | "none";
  */
 const DEFAULT_TIMEOUT_MS = 15000;
 
+/** 그냥 잠깐 기다렸다가 요청 함수를 다시 부르는 헬퍼. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function apiFetch<T>(
   path: string,
   options: {
@@ -145,9 +177,18 @@ async function apiFetch<T>(
     query?: Record<string, string | number | boolean | undefined>;
     authAs?: AuthAs;
     timeoutMs?: number;
+    /** 내부 재시도 호출에서만 써요 — 바깥에서 넘기지 마세요. */
+    _retryCount?: number;
   } = {},
 ): Promise<T> {
-  const { method = "GET", body, query, authAs = "none", timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+  const {
+    method = "GET",
+    body,
+    query,
+    authAs = "none",
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    _retryCount = 0,
+  } = options;
 
   let url = `${API_BASE_URL}${path}`;
   if (query) {
@@ -207,6 +248,25 @@ async function apiFetch<T>(
   }
 
   if (!res.ok) {
+    // ⚠️ "초기화 후 좌석을 눌러도 오류가 난다"는 문제의 실제 원인 중 하나:
+    // 초기화(좌석 여러 개 DELETE) → 좌석 만들기(좌석 여러 개 POST)를 짧은
+    // 시간 안에 연달아 보내면, 개발용 백엔드(`php artisan serve`는 요청을
+    // 한 번에 하나씩만 처리하는 단일 스레드예요)나 Laravel의 기본 요청 제한
+    // (throttle) 미들웨어에 걸려 그 사이에 낀 요청 하나가 429(너무 많은 요청)나
+    // 502/503/504(그 순간 서버가 응답을 못 만들어 냄)로 실패할 수 있어요.
+    // 이런 상태는 "고장"이 아니라 "일시적으로 바쁨"이라서, 몇백 ms만 있다가
+    // 다시 보내면 대부분 성공해요(로그아웃 후 재시도하면 된다던 것도 사실
+    // 그 사이에 시간이 지나 서버가 밀린 요청을 다 처리했기 때문일 뿐이에요).
+    // GET처럼 여러 번 반복해도 안전한 요청은 물론, PATCH/DELETE/POST도 이런
+    // "요청 자체가 서버에 도달하지 못하고 거절된" 상황에서는 다시 보내도
+    // 안전해서(서버가 실제로 처리를 시작한 뒤 응답만 못 준 경우와는 달라요),
+    // 최대 2번까지 짧게 기다렸다가 자동으로 재시도해요.
+    const isTransient = res.status === 429 || (res.status >= 502 && res.status <= 504);
+    if (isTransient && _retryCount < 2) {
+      await delay(400 * (_retryCount + 1));
+      return apiFetch<T>(path, { ...options, _retryCount: _retryCount + 1 });
+    }
+
     const d = (data ?? {}) as {
       message?: string;
       errors?: Record<string, string[]>;
@@ -666,6 +726,24 @@ export async function apiGetMyFavoriteStoreIds(): Promise<string[] | null> {
 
 /* ---------------------------------- 리뷰 ---------------------------------- */
 
+export type ApiReviewReply = {
+  id: number;
+  review_id: number;
+  author_id: number;
+  content: string;
+  created_at: string;
+  updated_at?: string;
+  author?: { id?: number; name?: string | null } | string | null;
+};
+
+export type ApiReviewImage = {
+  id: number;
+  review_id: number;
+  image_url: string;
+  alt_text?: string | null;
+  sort_order?: number;
+};
+
 export type ApiReview = {
   id: number;
   user_id: number;
@@ -673,7 +751,60 @@ export type ApiReview = {
   rating: number;
   content: string;
   created_at: string;
+  updated_at?: string;
+  /** 리뷰 작성자 표시 이름. 필드명이 문서화돼 있지 않아 응답에 없을 수 있어요. */
+  customer_name?: string | null;
+  /** 리뷰에 첨부된 사진. ⚠️ 스웨거 확인 결과 문자열 배열이 아니라
+   * {id, review_id, image_url, alt_text, sort_order} 객체 배열로 내려와요.
+   * 화면에서 실제 사진 URL만 꺼낼 땐 아래 extractReviewImageUrls()를 써요. */
+  images?: ApiReviewImage[] | null;
+  /** 사장님 답글. ⚠️ 2026-08 백엔드 변경으로 답글이 더 이상 문자열이 아니라
+   * {id, review_id, author_id, content, created_at, updated_at, author} 형태의
+   * 객체로 내려와요. 이 값을 화면에 그대로 렌더링하면(예: `{review.reply}`)
+   * "Objects are not valid as a React child" 런타임 에러가 나요 — 반드시
+   * extractReplyContent()로 답글 "본문 문자열"만 꺼내서 써야 해요. 예전
+   * 백엔드와의 호환을 위해 문자열로 오는 경우도 함께 허용해요. */
+  reply?: ApiReviewReply | string | null;
+  /** 답글의 서버 id. 백엔드에 따라 이 필드로 바로 내려주기도 하고(reply_id),
+   * reply 객체 안의 id로만 내려주기도 해요 — extractReplyId()가 둘 다 봐요. */
+  reply_id?: number | string | null;
 };
+
+/** review.reply가 문자열(예전 백엔드)이든 객체(현재 백엔드,
+ * {id, review_id, author_id, content, created_at, updated_at, author})든
+ * 상관없이 답글 "본문 문자열"만 안전하게 꺼내요. 이 함수를 거치지 않고
+ * review.reply를 화면에 직접 렌더링하면 리액트가 "Objects are not valid as
+ * a React child" 런타임 에러를 던져요. */
+export function extractReplyContent(reply: ApiReview["reply"]): string | null {
+  if (!reply) return null;
+  if (typeof reply === "string") return reply.length > 0 ? reply : null;
+  return reply.content && reply.content.length > 0 ? reply.content : null;
+}
+
+/** 답글의 서버 id를 문자열로 꺼내요(PUT/DELETE /api/owner/review-replies/{reply}에
+ * 필요해요). reply_id 필드가 있으면 그걸 쓰고, 없으면 reply 객체 안의 id를 써요. */
+export function extractReplyId(review: ApiReview): string | null {
+  if (review.reply_id !== undefined && review.reply_id !== null) {
+    return String(review.reply_id);
+  }
+  if (review.reply && typeof review.reply === "object") {
+    return String(review.reply.id);
+  }
+  return null;
+}
+
+/** review.images(서버 객체 배열: {id, review_id, image_url, alt_text, sort_order})에서
+ * 실제 사진 URL 문자열만 sort_order 순서대로 꺼내요. 화면(카페 상세의 리뷰/사진 탭)은
+ * 문자열 배열을 기대하므로, 이 함수를 거치지 않고 review.images를 그대로 쓰면 안 돼요. */
+export function extractReviewImageUrls(
+  images: ApiReview["images"],
+): string[] {
+  if (!images || images.length === 0) return [];
+  return [...images]
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    .map((img) => img.image_url)
+    .filter((url): url is string => !!url);
+}
 
 /** GET /api/stores/{store}/reviews */
 export async function apiGetStoreReviews(
@@ -681,13 +812,41 @@ export async function apiGetStoreReviews(
 ): Promise<ApiReview[] | null> {
   if (!isApiConfigured()) return null;
   try {
-    const res = await apiFetch<{ data: ApiReview[] }>(
+    // ⚠️ 이 엔드포인트도 스웨거에 응답 스키마가 없어서(200만 명시), 배열을
+    // {data:[...]}로 감싸서 줄 수도, 그냥 배열 자체를 줄 수도 있어요. 둘 다
+    // 처리해서 응답 모양이 예상과 다르다는 이유만으로 리뷰가 안 보이는 일이
+    // 없게 해요. 로그인한 손님으로 요청해야만 리뷰를 내려주는 서버일 수도
+    // 있어서 authAs도 함께 보내요(비로그인이어도 서버가 무시하면 그만이에요).
+    const res = await apiFetch<{ data: ApiReview[] } | ApiReview[]>(
       `/api/stores/${encodeURIComponent(String(storeId))}/reviews`,
+      { authAs: "customer" },
     );
-    return res.data ?? [];
+    if (Array.isArray(res)) return res;
+    return res?.data ?? [];
   } catch {
     return null;
   }
+}
+
+export type StoreRatingSummary = { rating: number; reviewCount: number };
+
+/** 지도/검색/찜 목록 카드에 쓸 평균 별점·리뷰 수를 계산해요.
+ * ------------------------------------------------------------------
+ * ⚠️ GET /api/stores (매장 목록)는 평균 별점을 내려주지 않아서(카페 상세
+ * 화면만 GET /api/stores/{store}/reviews로 직접 계산하고 있었어요), 예전엔
+ * 지도 마커·검색 결과·찜 목록 카드가 전부 하드코딩된 0점으로 보였어요.
+ * 매장별 평균 별점 전용 API가 따로 없어서, 카페 상세 화면과 똑같이
+ * GET /api/stores/{store}/reviews 결과를 이 화면들에서도 직접 계산해요. */
+export async function apiGetStoreRating(
+  storeId: string | number,
+): Promise<StoreRatingSummary> {
+  const reviews = await apiGetStoreReviews(storeId);
+  if (!reviews || reviews.length === 0) return { rating: 0, reviewCount: 0 };
+  const sum = reviews.reduce((acc, r) => acc + (r.rating ?? 0), 0);
+  return {
+    rating: Math.round((sum / reviews.length) * 10) / 10,
+    reviewCount: reviews.length,
+  };
 }
 
 /** POST /api/stores/{store}/reviews — 등록된 리뷰(서버 id 포함)를 그대로 돌려줘요.
@@ -699,13 +858,25 @@ export async function apiCreateReview(
     content: string;
     order_id?: number;
     reservation_id?: number;
+    /** 리뷰 작성 화면에서 POST /api/uploads/images로 먼저 업로드해 받은 실제
+     * 이미지 URL들. 스웨거 확인 결과 서버는 이 필드를 `image_urls`라는 이름으로
+     * 받아요(아래 apiFetch 호출 시 image_urls로 변환해서 보내요). 이전에는
+     * 이 URL들이 이 기기의 로컬 저장소에만 남아서, 같은 컴퓨터라도 localhost와
+     * IP 주소로 접속하면 서로 다른 저장공간이라 사진이 안 보였어요. 이제
+     * 서버에도 실제로 저장돼서 모든 손님·모든 기기에서 리뷰 사진이 보여요. */
+    images?: string[];
   },
 ): Promise<ApiReview | null> {
   if (!isApiConfigured()) return null;
   try {
+    const { images, ...rest } = input;
+    const body = {
+      ...rest,
+      ...(images && images.length > 0 ? { image_urls: images } : {}),
+    };
     const res = await apiFetch<{ review?: ApiReview } | ApiReview>(
       `/api/stores/${encodeURIComponent(String(storeId))}/reviews`,
-      { method: "POST", body: input, authAs: "customer" },
+      { method: "POST", body, authAs: "customer" },
     );
     if (res && typeof res === "object" && "review" in res && res.review)
       return res.review;
@@ -716,16 +887,21 @@ export async function apiCreateReview(
   }
 }
 
-/** PUT /api/reviews/{review} */
+/** PUT /api/reviews/{review} — 내 리뷰·사진 수정 */
 export async function apiUpdateReview(
   reviewId: string | number,
-  input: { rating: number; content: string },
+  input: { rating: number; content: string; images?: string[] },
 ): Promise<boolean> {
   if (!isApiConfigured()) return false;
   try {
+    const { images, ...rest } = input;
+    const body = {
+      ...rest,
+      ...(images && images.length > 0 ? { image_urls: images } : {}),
+    };
     await apiFetch(`/api/reviews/${encodeURIComponent(String(reviewId))}`, {
       method: "PUT",
-      body: input,
+      body,
       authAs: "customer",
     });
     return true;
@@ -747,6 +923,76 @@ export async function apiDeleteReview(
     return true;
   } catch {
     return false;
+  }
+}
+
+export type MyApiReview = ApiReview & {
+  /** 이 리뷰가 달린 매장 이름. ApiReview 자체엔 매장 이름이 없어서, 아래
+   * apiGetMyReviews()가 주문 내역(GET /api/users/me/orders)에서 매장 이름을
+   * 함께 가져와 붙여줘요. */
+  store_name: string | null;
+};
+
+/** "내가 쓴 리뷰 전체 목록"을 서버 기준으로 계산해요.
+ * ------------------------------------------------------------------
+ * ⚠️ api-docs.json 스웨거에는 "내 리뷰 목록 전체 조회" 전용 API가 없어요
+ * (GET /api/stores/{store}/reviews처럼 매장 단위 조회만 있어요). 그래서
+ * /my/reviews 화면이 지금까지 이 기기의 localStorage만 보고 있었는데, 이게
+ * localhost와 IP 주소(예: 192.168.0.70)를 서로 다른 저장공간으로 취급하는
+ * 브라우저 특성 때문에 "같은 계정인데 접속 주소에 따라 리뷰가 보였다 안 보였다"
+ * 하는 버그의 원인이었어요(같은 계정과 실제로 연결이 안 된 게 아니라, 애초에
+ * 서버에서 안 불러오고 있었던 거예요).
+ *
+ * 여기서는 내가 주문한 매장 목록(GET /api/users/me/orders)을 먼저 가져온 뒤,
+ * 그 매장들의 리뷰(GET /api/stores/{store}/reviews)를 각각 조회해서 내
+ * user_id로 걸러 모아요. 이러면 어느 기기·어느 주소로 접속해도 같은 계정이면
+ * 항상 같은 리뷰 목록이 보여요. 백엔드에 전용 "내 리뷰 목록" API가 추가되면
+ * 이 함수 내부만 그 API 호출로 바꾸면 돼요.
+ */
+export async function apiGetMyReviews(): Promise<MyApiReview[] | null> {
+  if (!isApiConfigured()) return null;
+  try {
+    const me = await apiGetMe("customer");
+    if (!me) return null;
+
+    const orders = await apiGetMyOrders();
+    if (!orders) return null;
+
+    const storeNameById = new Map<number, string | null>();
+    for (const order of orders) {
+      if (order.storeId != null && !storeNameById.has(order.storeId)) {
+        storeNameById.set(order.storeId, order.storeName);
+      }
+    }
+    const storeIds = Array.from(storeNameById.keys());
+
+    const perStore = await Promise.all(
+      storeIds.map((storeId) => apiGetStoreReviews(storeId))
+    );
+
+    const seen = new Set<number>();
+    const mine: MyApiReview[] = [];
+    perStore.forEach((reviews, idx) => {
+      if (!reviews) return;
+      const storeId = storeIds[idx];
+      for (const review of reviews) {
+        // ⚠️ "리뷰가 분명 있는데 /my/reviews엔 하나도 안 보인다"는 문제의
+        // 실제 원인: review.user_id/me.id를 TS 타입으로는 둘 다 number라고
+        // 선언했지만, 실제 서버 응답은 검증되지 않은 raw JSON이라 한쪽이
+        // 문자열("5")로 오면 숫자(5)와 `!==` 비교에서 항상 다르다고 판정돼
+        // 리뷰가 전부 걸러졌어요. 문자열로 바꿔서 비교해 이 타입 불일치를
+        // 흡수해요.
+        if (String(review.user_id) !== String(me.id)) continue;
+        if (seen.has(review.id)) continue;
+        seen.add(review.id);
+        mine.push({ ...review, store_name: storeNameById.get(storeId) ?? null });
+      }
+    });
+
+    mine.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return mine;
+  } catch {
+    return null;
   }
 }
 
@@ -1158,17 +1404,25 @@ function parseOrder(raw: Record<string, unknown>): ApiOrderDetail {
   const id = Number(pick(raw, ["id"]) ?? 0);
   const storeId = pick<number>(raw, ["store_id"]) ?? (store ? pick<number>(store, ["id"]) : undefined);
 
-  // ⚠️ 결제 금액/메뉴 구성이 0원·빈 값으로 오는 문제 보정: 이 브라우저에서 방금
-  // 만든 주문이면(orderHintKey) 결제 화면이 이미 알고 있던 정확한 금액/구성으로
-  // 채워요. 서버 응답에 실제 값이 있으면 그 값을 그대로 쓰고, 캐시는 "없을 때만" 써요.
+  // ⚠️ "결제 금액이 0원으로 뜬다"는 문제의 진짜 원인(브라우저 콘솔/서버 스웨거로
+  // 직접 확인됨): 서버가 각 메뉴 줄의 가격(item.price)은 정확히 채워서 내려주지만
+  // (그래서 메뉴별 줄은 "국민커피 × 3 6,300원"처럼 항상 맞게 보였어요), 주문
+  // 전체의 total_amount/amount 필드 자체를 계산해서 채워주지 않아요(0 또는
+  // 없음) — 이건 프론트가 아니라 서버(주문 생성 시 합계를 저장하지 않음) 쪽
+  // 문제라, 백엔드 팀에 "주문 저장 시 total_amount = Σ(메뉴가격×수량) 계산"을
+  // 요청해야 근본적으로 고쳐져요. 그때까지는 프론트에서 같은 계산을 대신 해서
+  // 화면엔 항상 올바른 결제 금액이 보이게 해요.
+  // ⚠️ 예전의 hint(주문 생성 화면이 저장해둔 캐시) 방식은 "내가 우리 앱 결제
+  // 화면으로 직접 주문한 경우"에만 동작해요 — 사장님 화면(다른 브라우저/기기)이나
+  // 스웨거로 직접 만든 테스트 주문에는 애초에 hint가 없어서 0원이 그대로
+  // 보였어요(스크린샷의 사장님 화면·주문내역·서버 응답 모두 0원인 이유). 메뉴
+  // 줄 가격은 서버가 항상 정확히 주므로, hint보다 먼저 "메뉴 줄 합계"로
+  // 우선 계산하고, 그마저 없을 때만 hint/서버값 순으로 내려가요.
   const hint = id ? getOrderHint(id) : null;
   let totalAmount = Number(pick(raw, ["total_amount", "amount"]) ?? 0);
   let items = Array.isArray(itemsRaw)
     ? itemsRaw.map((it) => parseOrderItem(it as Record<string, unknown>))
     : [];
-  if ((!totalAmount || Number.isNaN(totalAmount)) && hint) {
-    totalAmount = hint.amount;
-  }
   if ((items.length === 0 || items.every((it) => !it.price)) && hint?.items?.length) {
     items = hint.items.map((h, idx) => ({
       menuId: items[idx]?.menuId ?? null,
@@ -1176,6 +1430,15 @@ function parseOrder(raw: Record<string, unknown>): ApiOrderDetail {
       quantity: h.quantity,
       price: h.price,
     }));
+  }
+  const pointUsed = Number(pick(raw, ["point_used"]) ?? 0);
+  if (!totalAmount || Number.isNaN(totalAmount)) {
+    const itemsSum = items.reduce((sum, it) => sum + it.price * it.quantity, 0);
+    if (itemsSum > 0) {
+      totalAmount = Math.max(0, itemsSum - pointUsed);
+    } else if (hint) {
+      totalAmount = hint.amount;
+    }
   }
 
   return {
@@ -1214,7 +1477,7 @@ function parseOrder(raw: Record<string, unknown>): ApiOrderDetail {
     ),
     status: String(pick(raw, ["status"]) ?? "PENDING"),
     totalAmount,
-    pointUsed: Number(pick(raw, ["point_used"]) ?? 0),
+    pointUsed,
     createdAt: pick<string>(raw, ["created_at"]) ?? null,
     items,
   };
@@ -1287,48 +1550,140 @@ export type TodaySalesResponse = {
  *    라고 추측하지 않고 실제 hours 배열을 그대로 X축에 써요.
  *  - GET /api/owner/stores/{store}/sales?from=어제&to=어제 의
  *    summary.total_sales 를 전일 총 매출로 사용해요.
+ *
+ * ⚠️ "결제까지 끝낸 주문이 있는데 매출이 0원으로 뜬다"는 문제의 진짜 원인(서버
+ * 응답/스웨거 직접 확인됨): 주문 자체의 total_amount가 서버에 계산·저장되지
+ * 않아요(주문 상세의 "결제 금액 0원" 문제와 동일한 원인). dashboard의 sales
+ * 배열도 결국 이 total_amount를 합산해서 만드는 값이라, 원인이 같으면 여기도
+ * 항상 0으로 나와요. parseOrder에서 이미 "메뉴 줄 가격 합계"로 주문별 결제
+ * 금액을 보정해뒀으니, dashboard 응답이 전부 0이면 같은 매장의 주문 목록(GET
+ * /api/owner/stores/{store}/orders)을 가져와 오늘 날짜의 결제 완료 주문들을
+ * 시간대별로 직접 누적 합산해서 그래프를 채워요. 서버가 나중에 total_amount를
+ * 제대로 계산해 주기 시작하면 dashboard 값이 0이 아니게 되고, 그 순간부터는
+ * 자동으로 서버 값을 그대로 써요(이 보정은 "0일 때만" 개입해요).
  */
+function localDateKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate(),
+  ).padStart(2, "0")}`;
+}
+
+// 결제가 실제로 이뤄진(취소/거절/결제전 제외) 주문만 매출로 쳐요.
+const UNPAID_ORDER_STATUSES = new Set(["PENDING_PAYMENT", "CANCELLED", "REJECTED", "REFUNDED"]);
+
+function computeHourlySalesFromOrders(orders: ApiOrderDetail[], dateKey: string): SalesPoint[] {
+  const todays = orders.filter(
+    (o) => o.createdAt && o.createdAt.slice(0, 10) === dateKey && !UNPAID_ORDER_STATUSES.has(o.status),
+  );
+  if (todays.length === 0) return [];
+  todays.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
+  const byHour = new Map<string, number>();
+  let running = 0;
+  for (const o of todays) {
+    const hour = (o.createdAt ?? "").slice(11, 13) || "09";
+    running += o.totalAmount;
+    byHour.set(hour, running);
+  }
+  return Array.from(byHour.entries())
+    .map(([hour, amount]) => ({ hour, amount }))
+    .sort((a, b) => a.hour.localeCompare(b.hour));
+}
+
+function sumOrdersAmount(orders: ApiOrderDetail[], dateKey: string): number {
+  return orders
+    .filter((o) => o.createdAt && o.createdAt.slice(0, 10) === dateKey && !UNPAID_ORDER_STATUSES.has(o.status))
+    .reduce((sum, o) => sum + o.totalAmount, 0);
+}
+
 export async function fetchTodaySales(
   storeId: string | number,
 ): Promise<TodaySalesResponse | null> {
   if (!isApiConfigured()) return null;
 
-  try {
-    const [dashboard, yesterday] = await Promise.all([
-      apiFetch<{
-        sales: number[];
-        sales_meta?: { hours?: number[] };
-      }>(`/api/owner/stores/${encodeURIComponent(String(storeId))}/dashboard`, {
-        authAs: "owner",
-      }),
-      (() => {
-        const d = new Date();
-        d.setDate(d.getDate() - 1);
-        const iso = d.toISOString().slice(0, 10);
-        return apiFetch<{ summary: { total_sales: number } }>(
-          `/api/owner/stores/${encodeURIComponent(String(storeId))}/sales`,
-          { authAs: "owner", query: { from: iso, to: iso } },
-        );
-      })(),
-    ]);
+  // ⚠️ 예전엔 아래 세 요청을 Promise.all로 한 번에 묶어서 보냈어요. 그런데
+  // 문서에도 없는 추측성 엔드포인트(/api/owner/stores/{id}/sales)가 실서버엔
+  // 없어서 항상 실패하고, Promise.all은 하나만 실패해도 전부 reject시켜서
+  // dashboard/orders가 멀쩡히 성공했어도 catch로 빠져 null을 돌려줬어요.
+  // 그러면 화면은 "어제 매출"을 계속 0으로 유지해서 "0% 어제 대비"로 보였어요
+  // (오늘 매출 13,100원처럼 실제 값이 있어도 마찬가지). Promise.allSettled로
+  // 바꿔서 일부가 실패해도 성공한 나머지는 그대로 반영해요.
+  const [dashboardResult, yesterdayResult, ordersResult] = await Promise.allSettled([
+    apiFetch<{
+      sales: number[];
+      sales_meta?: { hours?: number[] };
+    }>(`/api/owner/stores/${encodeURIComponent(String(storeId))}/dashboard`, {
+      authAs: "owner",
+    }),
+    (() => {
+      const d = new Date();
+      d.setDate(d.getDate() - 1);
+      // ⚠️ toISOString()은 UTC 기준 날짜를 잘라서, 한국 시간 자정 근처에는
+      // 실제 "어제"와 하루 어긋날 수 있었어요. 로컬 날짜로 계산해요.
+      const iso = localDateKey(d);
+      return apiFetch<{ summary: { total_sales: number } }>(
+        `/api/owner/stores/${encodeURIComponent(String(storeId))}/sales`,
+        { authAs: "owner", query: { from: iso, to: iso } },
+      );
+    })(),
+    apiOwnerListStoreOrders(storeId),
+  ]);
 
-    const sales = dashboard.sales ?? [];
-    // sales_meta.hours가 있으면 그대로 쓰고(백엔드가 실제 시간대를 알려줌),
-    // 혹시 없는 옛 응답이 오더라도 09시부터 순서대로라고 가정해 화면이 안 깨지게 해요.
-    const hours = dashboard.sales_meta?.hours ?? sales.map((_, i) => 9 + i);
-    const hourly: SalesPoint[] = sales.map((amount, i) => ({
-      hour: String(hours[i] ?? 9 + i).padStart(2, "0"),
-      amount,
-    }));
+  const dashboard = dashboardResult.status === "fulfilled" ? dashboardResult.value : null;
+  const yesterday = yesterdayResult.status === "fulfilled" ? yesterdayResult.value : null;
+  const orders = ordersResult.status === "fulfilled" ? ordersResult.value : null;
 
-    return {
-      hourly,
-      yesterdayTotal: yesterday.summary?.total_sales ?? 0,
-    };
-  } catch (err) {
-    console.warn("[sales] 매출 데이터를 불러오지 못했어요.", err);
+  // 대시보드도, 주문 목록도 둘 다 못 가져왔을 때만 진짜 실패로 보고 null을
+  // 돌려줘요(화면이 이전 값을 그대로 유지). 하나라도 성공했으면 그 값으로
+  // 최대한 정확하게 계산해요.
+  if (!dashboard && !orders) {
+    console.warn("[sales] 매출 데이터를 불러오지 못했어요.");
     return null;
   }
+
+  const sales = dashboard?.sales ?? [];
+  // sales_meta.hours가 있으면 그대로 쓰고(백엔드가 실제 시간대를 알려줌),
+  // 혹시 없는 옛 응답이 오더라도 09시부터 순서대로라고 가정해 화면이 안 깨지게 해요.
+  const hours = dashboard?.sales_meta?.hours ?? sales.map((_, i) => 9 + i);
+  // ⚠️ "방금 주문 하나를 완료 처리했는데 오늘 매출에 안 뜬다"는 문제의 원인
+  // 하나: 응답이 항상 시간 순서대로 온다는 보장이 없는데(예: 백엔드가 시간대별
+  // 집계를 만드는 순서가 insert 순서를 따르는 경우), 화면(owner-store.tsx)은
+  // 그냥 배열의 "마지막 값"을 오늘 총 매출로 써요. 시간 순서가 뒤섞여 오면
+  // 실제로는 있는 매출이 배열 중간에 있는데 마지막(더 이른 시간대) 값을
+  // "오늘 매출"로 보여줘서 0원이거나 낮은 금액으로 보일 수 있었어요. 여기서
+  // 시간(hour) 기준으로 정렬해 배열을 넘겨줘서, 화면의 "마지막 값 = 가장
+  // 늦은 시간대(=지금까지의 누적 총액)"라는 가정이 항상 맞게 해요.
+  let hourly: SalesPoint[] = sales
+    .map((amount, i) => ({
+      hour: String(hours[i] ?? 9 + i).padStart(2, "0"),
+      amount,
+    }))
+    .sort((a, b) => a.hour.localeCompare(b.hour));
+
+  // ⚠️ "/sales" 엔드포인트는 실제 API 문서(Swagger)에 없는 추측성 경로라
+  // 대부분 404가 나요. 그래서 어제 매출은 이미 다른 곳에서도 검증된 "주문
+  // 목록"에서 직접 합산하는 걸 1순위로 쓰고, 추측성 엔드포인트 응답은 혹시
+  // 있을 때만 보조로 써요(우선순위를 뒤집었던 게 "4천원 매출이 있는데도
+  // 0%로 뜨는" 문제의 직접 원인이었어요).
+  let yesterdayTotal = 0;
+  if (orders) {
+    const y = new Date();
+    y.setDate(y.getDate() - 1);
+    yesterdayTotal = sumOrdersAmount(orders, localDateKey(y));
+  }
+  if (!yesterdayTotal && yesterday?.summary?.total_sales) {
+    yesterdayTotal = yesterday.summary.total_sales;
+  }
+
+  if (orders) {
+    const todayKey = localDateKey(new Date());
+    const dashboardIsAllZero = hourly.length === 0 || hourly.every((p) => p.amount === 0);
+    if (dashboardIsAllZero) {
+      const fallback = computeHourlySalesFromOrders(orders, todayKey);
+      if (fallback.length > 0) hourly = fallback;
+    }
+  }
+
+  return { hourly, yesterdayTotal };
 }
 
 export type ApiMenu = {

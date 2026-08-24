@@ -76,8 +76,6 @@ export default function OrderDetailPage({
             {order.status}
           </span>
         </div>
-        <p className="mt-1 text-[13px] text-ink-secondary">주문번호 {order.id}</p>
-
         <div className="mt-6 flex flex-col gap-2 rounded-2xl border border-border bg-white p-5">
           {order.items.map((it, i) => (
             <div key={i} className="flex justify-between text-[14px] text-ink-secondary">

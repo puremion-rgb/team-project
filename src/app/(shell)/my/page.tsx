@@ -17,16 +17,16 @@ export default function MyPage() {
 
       <div className="px-6 pt-5">
         <div className="flex items-center gap-4 rounded-2xl border border-border bg-white p-5">
-          {avatarUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={avatarUrl}
-              alt="프로필 사진"
-              className="h-16 w-16 shrink-0 rounded-full object-cover"
-            />
-          ) : (
-            <ImagePlaceholder className="h-16 w-16 shrink-0" rounded="rounded-full" />
-          )}
+          {/* ⚠️ 예전엔 avatarUrl이 있으면 무조건 <img>로 바로 그렸는데, 그
+              주소가 실제로는 안 열리는 경우(백엔드 접속 불가 등) 브라우저
+              기본 "깨진 이미지" 아이콘이 그대로 보였어요. ImagePlaceholder는
+              로드에 실패하면 자동으로 회색 아이콘으로 대체해줘서 더 안전해요. */}
+          <ImagePlaceholder
+            className="h-16 w-16 shrink-0"
+            rounded="rounded-full"
+            src={avatarUrl}
+            alt="프로필 사진"
+          />
           <div>
             <p className="text-[18px] font-bold text-ink">
               {profileLoading ? "불러오는 중..." : displayName}

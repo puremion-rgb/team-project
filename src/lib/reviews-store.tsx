@@ -3,6 +3,7 @@
 import {
   createContext,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type ReactNode,
@@ -12,7 +13,10 @@ import {
   apiCreateReview,
   apiUpdateReview,
   apiDeleteReview,
+  apiGetMyReviews,
+  extractReviewImageUrls,
   isApiConfigured,
+  type MyApiReview,
 } from "@/lib/api";
 
 type ReviewsContextValue = {
@@ -73,18 +77,46 @@ function isServerReviewId(id: string): boolean {
   return /^\d+$/.test(id);
 }
 
+/** 서버 리뷰(user_id로 이미 "내 리뷰"임이 확인된 것)를 화면이 쓰는 Review
+ * 모양으로 바꿔요. created_at("2026-08-21T09:00:00Z" 등)을 화면 표기 형식
+ * ("2026.08.21")으로 바꾸고, images는 URL 문자열 배열로 펼쳐요. */
+function fromApiReview(r: MyApiReview): Review {
+  const created = r.created_at ? new Date(r.created_at) : null;
+  const date =
+    created && !Number.isNaN(created.getTime())
+      ? `${created.getFullYear()}.${String(created.getMonth() + 1).padStart(2, "0")}.${String(
+          created.getDate()
+        ).padStart(2, "0")}`
+      : "";
+  return {
+    id: String(r.id),
+    cafeId: String(r.store_id),
+    cafeName: r.store_name ?? "카페",
+    rating: r.rating,
+    content: r.content,
+    date,
+    images: extractReviewImageUrls(r.images),
+    // ⚠️ 서버 리뷰 목록 응답엔 이 리뷰가 어느 주문을 인증으로 썼는지가 안 내려와서
+    // orderId는 비워둬요. "이미 리뷰를 남긴 주문인지" 판단은 지금 세션에서 직접
+    // 작성한 리뷰(orderId 있음)에 한해서만 동작해요.
+  };
+}
+
 /**
  * 손님이 작성한 리뷰 목록을 관리하는 컨텍스트.
  * 리뷰 관리 목록(/my/reviews)과 작성/수정 화면(/my/reviews/write)이
  * 같은 데이터를 공유해서, 실제로 "수정"이 반영되도록 해요.
  *
- * ⚠️ api-docs.json 스웨거에는 "내가 쓴 리뷰 목록 전체 조회" API가 없어요
- * (GET /api/stores/{store}/reviews처럼 매장 단위 조회만 있어요). 그래서 이 목록은
- * 서버의 진짜 목록이 아니라, 이 기기에서 이 앱으로 작성/조회한 리뷰를 모아두는
- * 로컬 캐시예요. 새로 작성하면 즉시 화면에 반영하고, 뒤에서
- * POST /api/stores/{store}/reviews로 서버 등록도 시도해요(성공하면 서버가 준 진짜
- * id로 교체돼서 이후 수정·삭제도 서버에 반영돼요). 백엔드에 "내 리뷰 목록" API가
- * 추가되면, 아래 초기값을 그 API 응답으로 채우도록 바꾸면 돼요.
+ * ⚠️ api-docs.json 스웨거에는 "내가 쓴 리뷰 목록 전체 조회" 전용 API가 없어요
+ * (GET /api/stores/{store}/reviews처럼 매장 단위 조회만 있어요). 그래서 화면이
+ * 뜰 때는 일단 이 기기의 로컬 캐시(localStorage)로 먼저 보여준 뒤, 곧바로
+ * apiGetMyReviews()(내가 주문한 매장들의 리뷰를 모아 내 user_id로 걸러낸 결과)로
+ * 다시 채워요. 이렇게 서버 기준으로 다시 채우기 전에는, 같은 계정이라도
+ * localhost/IP 등 접속 주소가 다르면(=localStorage가 서로 다른 저장공간이라)
+ * 리뷰가 안 보이는 문제가 있었어요. 새로 작성한 리뷰는 즉시 화면에 반영하고
+ * 뒤에서 POST /api/stores/{store}/reviews로 서버 등록도 시도해요(성공하면 서버가
+ * 준 진짜 id로 교체돼서 이후 수정·삭제도 서버에 반영돼요). 백엔드에 전용
+ * "내 리뷰 목록" API가 추가되면 apiGetMyReviews() 내부만 바꾸면 돼요.
  */
 export function ReviewsProvider({ children }: { children: ReactNode }) {
   const [reviews, setReviews] = useState<Review[]>(() => readReviewsStorage());
@@ -93,6 +125,26 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     writeReviewsStorage(next);
     return next;
   };
+
+  // 화면이 뜰 때 서버 기준 "내 리뷰"를 불러와서 목록을 맞춰요. 이러면
+  // localhost/IP 등 접속 주소나 기기가 달라도(=localStorage가 비어 있어도)
+  // 같은 계정이면 항상 같은 리뷰가 보여요. 아직 서버에 안 올라간(방금 작성해서
+  // 서버 응답을 기다리는 중인) 로컬 임시 항목은 그대로 앞에 남겨둬요.
+  useEffect(() => {
+    if (!isApiConfigured()) return;
+    let cancelled = false;
+    void apiGetMyReviews().then((serverReviews) => {
+      if (cancelled || !serverReviews) return;
+      const mapped = serverReviews.map(fromApiReview);
+      setReviews((prev) => {
+        const localOnly = prev.filter((r) => !isServerReviewId(r.id));
+        return persist([...localOnly, ...mapped]);
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const value = useMemo<ReviewsContextValue>(
     () => ({
@@ -114,7 +166,15 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
 
         if (!isApiConfigured()) return;
         const orderIdNum = orderId && /^\d+$/.test(orderId) ? Number(orderId) : undefined;
-        void apiCreateReview(cafeId, { rating, content, order_id: orderIdNum }).then((created) => {
+        // ⚠️ images를 서버로도 함께 보내요. 안 보내면 이 기기(이 브라우저+주소)의
+        // 로컬 저장소에만 사진이 남아서, 다른 손님은 물론 같은 사람이라도 다른
+        // 주소(예: localhost 대신 IP)로 접속하면 사진이 아예 안 보여요.
+        void apiCreateReview(cafeId, {
+          rating,
+          content,
+          order_id: orderIdNum,
+          images: images && images.length > 0 ? images : undefined,
+        }).then((created) => {
           if (!created) return;
           // 서버가 실제로 발급해준 id로 바꿔서, 이후 수정·삭제가 서버에도 반영되게 해요.
           setReviews((prev) =>
@@ -125,9 +185,13 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
       updateReview: (id, patch) => {
         setReviews((prev) => persist(prev.map((r) => (r.id === id ? { ...r, ...patch } : r))));
         if (isApiConfigured() && isServerReviewId(id)) {
-          // 서버 API는 rating/content만 문서화돼 있어서, images는 이 기기에만
-          // 저장하고 서버로는 rating/content만 보내요.
-          void apiUpdateReview(id, { rating: patch.rating, content: patch.content });
+          // images도 함께 보내요(서버가 이 필드를 지원하면 다른 기기·다른 손님도
+          // 수정된 사진을 볼 수 있어요. 지원하지 않으면 서버가 조용히 무시해요).
+          void apiUpdateReview(id, {
+            rating: patch.rating,
+            content: patch.content,
+            images: patch.images && patch.images.length > 0 ? patch.images : undefined,
+          });
         }
       },
       removeReview: (id) => {

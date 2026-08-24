@@ -461,7 +461,7 @@ export default function MapPage() {
                   </div>
                   <p className="flex items-center gap-1 text-[13px] text-ink-secondary">
                     <Star size={13} className="fill-amber text-amber" />
-                    {activeCafe.rating} · {activeCafe.distance}
+                    {activeCafe.rating} ({activeCafe.reviewCount})
                   </p>
                   <div>
                     <StatusBadge

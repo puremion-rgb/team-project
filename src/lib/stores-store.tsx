@@ -15,6 +15,7 @@ import {
   apiListStores,
   apiGetStore,
   apiGetStoreCongestion,
+  apiGetStoreRating,
   isApiConfigured,
   resolveImageUrl,
   type ApiStore,
@@ -111,13 +112,14 @@ export function mapStoreToCafe(
   store: ApiStore,
   availability?: ApiAvailability | null,
   likedIds?: Set<string>,
+  rating?: { rating: number; reviewCount: number } | null,
 ): Cafe {
   const id = String(store.id);
   return {
     id,
     name: store.name,
-    rating: 0,
-    reviewCount: 0,
+    rating: rating?.rating ?? 0,
+    reviewCount: rating?.reviewCount ?? 0,
     distance: "-",
     status: availability
       ? CONGESTION_TO_STATUS[availability.congestion]
@@ -136,6 +138,8 @@ export function mapStoreToCafe(
     // 사장님이 매장 프로필에서 저장한 대표 이미지. 서버가 상대 경로("/storage/...")를
     // 줄 수도 있어서 resolveImageUrl로 절대 URL로 바꿔둬요(그래야 img src가 바로 동작해요).
     imageUrl: resolveImageUrl(store.thumbnail_url),
+    description: store.description ?? null,
+    businessHours: store.business_hours ?? undefined,
   };
 }
 
@@ -214,12 +218,17 @@ export function StoresProvider({ children }: { children: ReactNode }) {
     apiListStores()
       .then(async (stores) => {
         if (cancelled || !stores) return;
-        const availabilities = await Promise.all(
-          stores.map((s) => apiGetStoreCongestion(s.id)),
-        );
+        // ⚠️ GET /api/stores는 평균 별점을 안 내려줘서, 예전엔 지도/검색/찜
+        // 목록의 별점이 항상 0으로 고정돼 보였어요(리뷰가 실제로 달려도 반영
+        // 안 됨). 카페 상세 화면과 똑같이 매장별 리뷰를 불러와서 평균 별점·
+        // 리뷰 수를 직접 계산해요.
+        const [availabilities, ratings] = await Promise.all([
+          Promise.all(stores.map((s) => apiGetStoreCongestion(s.id))),
+          Promise.all(stores.map((s) => apiGetStoreRating(s.id))),
+        ]);
         if (cancelled) return;
         const mapped = stores.map((s, i) =>
-          mapStoreToCafe(s, availabilities[i]),
+          mapStoreToCafe(s, availabilities[i], undefined, ratings[i]),
         );
         setCafes(mapped);
         setIsMock(false);
@@ -288,10 +297,12 @@ export function StoresProvider({ children }: { children: ReactNode }) {
 
   const refreshCafe = useCallback((id: string) => {
     if (!isApiConfigured()) return;
-    apiGetStore(id).then((res) => {
+    // 매장 상세와 함께 평균 별점도 같이 다시 불러와요(카페 상세를 한 번
+    // 열었다 지도/찜 목록으로 돌아왔을 때도 별점이 반영되게 해요).
+    Promise.all([apiGetStore(id), apiGetStoreRating(id)]).then(([res, rating]) => {
       if (!res) return;
       setCafes((prev) => {
-        const fresh = mapStoreToCafe(res.store, res.availability);
+        const fresh = mapStoreToCafe(res.store, res.availability, undefined, rating);
         const exists = prev.some((c) => c.id === id);
         if (!exists) return [...prev, { ...fresh, liked: false }];
         return prev.map((c) =>

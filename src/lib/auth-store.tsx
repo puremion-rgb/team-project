@@ -182,6 +182,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!isApiConfigured()) {
       // 백엔드 URL이 아직 설정 안 된 상태(연동 전)에서만 데모용으로 통과시켜요.
       // 이전에 이 기기에서 프로필을 저장해둔 적이 있으면 그대로 이어서 보여줘요.
+      // ⚠️ 예전엔 여기서 setIsLoggedIn(true)만 하고 아무것도 저장하지 않아서,
+      // 새로고침하면(마운트 시 Boolean(getCustomerToken())로 다시 판단) 로그인
+      // 상태가 원인 없이 사라졌어요("로그아웃한 적 없는데 새로고침하면 로그인
+      // 버튼이 도로 나타난다"는 것과 같은 종류의 문제예요). 데모 토큰을 실제로
+      // 저장해서 새로고침해도 상태가 그대로 유지되게 해요.
+      setCustomerToken("demo");
       setIsLoggedIn(true);
       return { ok: true };
     }
@@ -214,12 +220,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }): Promise<AuthResult> => {
     if (!isApiConfigured()) {
       // 백엔드 연동 전에는 회원가입 폼에 입력한 이름/이메일을 그대로 프로필에 저장해서
-      // MY 화면 등에서 곧바로 확인할 수 있게 해요.
+      // MY 화면 등에서 곧바로 확인할 수 있게 해요. (데모 토큰도 함께 저장해서
+      // 새로고침해도 로그인 상태가 유지돼요 — 위 login()과 같은 이유예요.)
       setProfile(() => {
         const next: CustomerProfile = { ...EMPTY_PROFILE, name: input.name, email: input.email };
         writeProfileStorage(next);
         return next;
       });
+      setCustomerToken("demo");
       setIsLoggedIn(true);
       return { ok: true };
     }
@@ -244,6 +252,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const loginWithSocialCode = async (code: string): Promise<AuthResult> => {
     if (!isApiConfigured()) {
+      setCustomerToken("demo");
       setIsLoggedIn(true);
       return { ok: true };
     }

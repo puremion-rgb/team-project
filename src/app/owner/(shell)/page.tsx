@@ -46,6 +46,18 @@ export default function OwnerHomePage() {
 
   const recent = orders.slice(0, 2);
 
+  // ⚠️ orders.length는 지금까지 불러온 주문 전체(누적)라서, 매장을 오래
+  // 운영할수록 "주문 건수"가 하루 접수량과 상관없이 계속 커지기만 했어요.
+  // 주문 카드의 date는 이미 "YYYY.MM.DD" 형식으로 정규화돼 있어서, 오늘
+  // 날짜 문자열과 그대로 비교하면 오늘 접수된 주문만 셀 수 있어요.
+  const todayLabel = (() => {
+    const now = new Date();
+    return `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(
+      now.getDate(),
+    ).padStart(2, "0")}`;
+  })();
+  const todayOrderCount = orders.filter((o) => o.date === todayLabel).length;
+
   return (
     <div className="flex flex-col pb-8">
       <OwnerTopBar />
@@ -119,7 +131,7 @@ export default function OwnerHomePage() {
         <StatCard label="좌석 수" value={`${seatTotal}`} unit="석" />
         <StatCard
           label="주문 건수"
-          value={`${orders.length}`}
+          value={`${todayOrderCount}`}
           unit="건"
         />
         <StatCard label="운영 알림" value={`${alertCount}`} unit="건" />
@@ -198,11 +210,24 @@ function SalesSparkline({ data }: { data: SalesPoint[] }) {
   const width = 110;
   const height = 50;
 
-  if (data.length < 2) {
+  // ⚠️ "오늘 매출 1건인데 그래프에 반영이 안 된다"는 문제의 실제 원인:
+  // 서버(/dashboard)는 실제로 매출이 찍힌 시간대만 배열에 담아 내려줘요(예:
+  // 오늘 주문이 오후 2시 1건뿐이면 sales/hours 배열 길이가 1). 그런데 이 아래
+  // 로직은 "점 2개 이상 있어야 선을 그릴 수 있다"는 이유로 데이터가 1개면
+  // 아예 빈 SVG(장식용 여백)만 그려서, 매출이 있어도 그래프엔 아무것도 안 보였어요.
+  // 데이터가 1개뿐일 때는 "영업 시작 시각(09시, 0원)"을 가상의 시작점으로
+  // 앞에 붙여서 최소 2개의 점으로 만들어 실제 매출을 반영한 선이 그려지게 해요.
+  const points0 =
+    data.length === 1
+      ? [{ hour: String(Math.min(9, Number(data[0].hour))).padStart(2, "0"), amount: 0 }, data[0]]
+      : data;
+
+  if (points0.length < 2) {
     return <svg viewBox={`0 0 ${width} ${height}`} className="h-[46px] w-[110px] shrink-0" />;
   }
 
-  const amounts = data.map((d) => d.amount);
+  const data2 = points0;
+  const amounts = data2.map((d) => d.amount);
   const min = Math.min(...amounts);
   const max = Math.max(...amounts);
   const range = max - min || 1;
@@ -210,8 +235,8 @@ function SalesSparkline({ data }: { data: SalesPoint[] }) {
   // 실제 시간대별 매출 데이터를 좌표로 변환해서 선을 그려요.
   // (더 이상 하드코딩된 장식용 경로가 아니라, todaySalesByHour 값이 바뀌면
   //  그래프도 함께 바뀌어요.)
-  const points = data.map((d, i) => {
-    const x = (i / (data.length - 1)) * width;
+  const points = data2.map((d, i) => {
+    const x = (i / (data2.length - 1)) * width;
     const y = height - 4 - ((d.amount - min) / range) * (height - 8);
     return { x, y };
   });

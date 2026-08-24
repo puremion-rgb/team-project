@@ -101,6 +101,11 @@ export function OwnerAuthProvider({ children }: { children: ReactNode }) {
   const ownerLogin = async (email?: string, password?: string): Promise<AuthResult> => {
     if (!isApiConfigured()) {
       // 백엔드 URL이 아직 설정 안 된 상태(연동 전)에서만 데모용으로 통과시켜요.
+      // ⚠️ 예전엔 여기서 setIsOwnerLoggedIn(true)만 하고 아무것도 저장하지
+      // 않아서, 새로고침하면(마운트 시 Boolean(getOwnerToken())로 다시 판단)
+      // 로그인 상태가 원인 없이 사라졌어요. 데모 토큰을 실제로 저장해서
+      // 새로고침해도 상태가 그대로 유지되게 해요.
+      setOwnerToken("demo");
       setIsOwnerLoggedIn(true);
       return { ok: true };
     }
@@ -132,6 +137,7 @@ export function OwnerAuthProvider({ children }: { children: ReactNode }) {
    * 함께 오면 그대로 쓰고, 없으면 GET /api/owner/store로 다시 찾아와요. */
   const ownerLoginWithSocialCode = async (code: string): Promise<AuthResult> => {
     if (!isApiConfigured()) {
+      setOwnerToken("demo");
       setIsOwnerLoggedIn(true);
       return { ok: true };
     }
@@ -155,6 +161,7 @@ export function OwnerAuthProvider({ children }: { children: ReactNode }) {
 
   const ownerSignup = async (input: OwnerSignupInput): Promise<AuthResult> => {
     if (!isApiConfigured()) {
+      setOwnerToken("demo");
       setIsOwnerLoggedIn(true);
       return { ok: true };
     }

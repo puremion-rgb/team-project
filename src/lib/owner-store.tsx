@@ -31,11 +31,15 @@ import {
   apiOwnerUpdateBusinessStatus,
   apiOwnerUpdateStoreProfile,
   apiGetStoreCongestion,
+  isApiConfigured,
   type ApiStore,
   type ApiStoreTag,
   type ApiStoreBusinessHour,
   type ApiSeat,
   type ApiReview,
+  extractReplyContent,
+  extractReplyId,
+  extractReviewImageUrls,
 } from "@/lib/api";
 import { useOwnerAuth } from "@/lib/owner-auth-store";
 import { geocodeAddress } from "@/lib/kakao-map-sdk";
@@ -321,46 +325,25 @@ function mapApiStoreToProfile(store: ApiStore, prev: StoreProfile): StoreProfile
   };
 }
 
-/** 리뷰 목록 응답에 고객 이름/사장님 답글 필드가 스웨거에 명세돼 있지 않아서
- * (성공 응답 스키마 없음) 흔히 쓰는 후보 필드명을 순서대로 시도해서 채워요.
- * 필드명이 다르면 화면에는 "고객"으로 표시되고, 답글은 빈 값으로 보여요
- * (기능은 그대로 정상 동작해요 — 화면이 깨지지 않아요). */
+/** GET /api/stores/{store}/reviews 결과(이제 api.ts에서 답글/작성자/사진까지
+ * 정규화해서 내려줘요)를 사장님 화면 모델로 그대로 옮겨요. */
 function mapApiReviewToOwnerReview(review: ApiReview): OwnerReview {
-  const raw = review as unknown as Record<string, unknown>;
-  const user = raw["user"] as Record<string, unknown> | undefined;
-  const customerName =
-    (raw["customer_name"] as string | undefined) ??
-    (raw["user_name"] as string | undefined) ??
-    (user?.["name"] as string | undefined) ??
-    "고객";
-  // 답글이 문자열로 그대로 오거나({reply: "내용"}), 객체로 오거나
-  // ({reply: {id, content}} / {owner_reply: {...}}) 둘 다 대응해요.
-  const replyRaw = raw["reply"] ?? raw["owner_reply"];
-  const replyObj =
-    replyRaw && typeof replyRaw === "object" ? (replyRaw as Record<string, unknown>) : undefined;
-  const reply =
-    (typeof replyRaw === "string" ? replyRaw : undefined) ??
-    (replyObj?.["content"] as string | undefined) ??
-    null;
-  const replyId =
-    (raw["reply_id"] as string | number | undefined) ??
-    (raw["owner_reply_id"] as string | number | undefined) ??
-    (replyObj?.["id"] as string | number | undefined);
-  const imagesRaw = raw["images"] ?? raw["photos"] ?? raw["photo_urls"];
-  const images = Array.isArray(imagesRaw)
-    ? imagesRaw
-        .map((v) => (typeof v === "string" ? v : (v as Record<string, unknown>)?.["url"]))
-        .filter((v): v is string => typeof v === "string")
-    : [];
   return {
     id: String(review.id),
-    customerName,
+    customerName: review.customer_name ?? "고객",
     rating: review.rating,
     content: review.content,
     date: review.created_at?.slice(0, 10).replace(/-/g, ".") ?? "",
-    reply: reply ?? null,
-    replyId: replyId !== undefined && replyId !== null ? String(replyId) : null,
-    images,
+    // ⚠️ review.reply는 문자열이 아니라 {id, review_id, author_id, content,
+    // created_at, updated_at, author} 객체로 내려와요. 객체를 그대로 넣으면
+    // 화면에서 그대로 렌더링될 때 "Objects are not valid as a React child"
+    // 런타임 에러가 나서, 반드시 extractReplyContent로 본문만 꺼내요.
+    reply: extractReplyContent(review.reply),
+    replyId: extractReplyId(review),
+    // ⚠️ review.images는 문자열 배열이 아니라 {id, review_id, image_url,
+    // alt_text, sort_order} 객체 배열로 내려와요. 그대로 넣으면 사진이 안
+    // 뜨고 타입도 어긋나서, extractReviewImageUrls로 실제 URL만 꺼내요.
+    images: extractReviewImageUrls(review.images),
   };
 }
 
@@ -423,6 +406,26 @@ type OwnerContextValue = {
   setSeatStatus: (id: string, status: SeatState) => void;
   addSeat: (label: string) => void;
   removeSeat: (id: string) => void;
+  /** 좌석 전체 삭제(중복 정리용). 서버에 실제로 지워진 좌석만 화면에서
+   * 지워요 — 자세한 이유는 아래 resetAllSeats 구현부 주석 참고. */
+  resetAllSeats: () => void;
+  /** 좌석 목록을 서버에서 불러오는 중인지 / 마지막 시도가 실패했는지. 실패
+   * 상태에선 "좌석이 진짜 0개인지 못 불러온 건지" 알 수 없으니, 화면이
+   * "좌석 만들기"를 섣불리 보여주지 않게 하는 데 써요. */
+  seatsLoading: boolean;
+  seatsLoadFailed: boolean;
+  retrySeatsLoad: () => void;
+  /** 좌석 전체 초기화(resetAllSeats)가 서버 응답을 기다리는 중인지예요.
+   * 이 동안엔 "총 좌석 수"가 실제로 몇 개인지 아직 확정되지 않은 상태라서,
+   * 화면이 섣불리 0개로 보여주며 "좌석 만들기"를 띄우면 안 돼요 — 그러면
+   * 아직 안 지워진(또는 삭제 실패한) 서버 좌석과 번호가 겹치는 새 좌석이
+   * 만들어져서 "1 1 1 1"처럼 중복 좌석이 쌓이는 사고로 이어져요. */
+  seatsResetting: boolean;
+  /** 좌석 추가/상태변경/삭제를 서버에 저장하려다 실패했을 때의 안내 문구.
+   * 화면에 보이는 좌석은 항상 낙관적으로 먼저 바뀌지만, 저장이 실패하면
+   * 원래 상태로 되돌리면서 이 메시지를 채워요 — "눌러도 반영이 안 되는" 것처럼
+   * 보이지 않고 왜 안 됐는지 알 수 있게요. 성공하면 다시 null이 돼요. */
+  seatSyncError: string | null;
   /** 손님 화면(지도/검색/카페 상세)과 정확히 같은 값이에요 — 둘 다 서버
    * GET /api/stores/{store}/congestion 값을 그대로 써요(seat-congestion.ts).
    * 아직 못 불러왔을 때만 좌석 수로 추정한 값을 잠깐 보여줘요. */
@@ -487,6 +490,18 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   // 2026-08-19 백엔드 변경사항 문서로 좌석 목록 조회(GET .../seats)가 추가돼서,
   // 이제 메뉴/예약과 동일하게 서버에서 실제 좌석 목록을 불러와요.
   const [seats, setSeats] = useState<OwnerSeat[]>(initialSeats);
+  const [seatSyncError, setSeatSyncError] = useState<string | null>(null);
+  // ⚠️ 예전엔 좌석 목록을 못 불러와도(서버 연결 실패 등) 그냥 seats가 빈
+  // 배열로 남아서, 화면은 "아직 등록된 좌석이 없어요"라고 보여줬어요. 근데
+  // 실제로는 서버에 이미 좌석이 있는데 "못 불러온 것"과 "진짜 0개인 것"을
+  // 구분할 수 없어서, 사장님이 그 화면만 보고 "좌석 만들기"를 다시 눌러
+  // 서버에 중복된 좌석이 쌓이는 사고(예: 1,2,3...이 여러 번 겹쳐 생김)가
+  // 있었어요. 이제 "불러오는 중" / "불러오기 실패" / "진짜 0개 확인됨"을
+  // 구분해서, 실패했을 땐 새로 만들기 버튼 대신 원인 안내를 보여줘요.
+  const [seatsLoading, setSeatsLoading] = useState(false);
+  const [seatsResetting, setSeatsResetting] = useState(false);
+  const [seatsLoadFailed, setSeatsLoadFailed] = useState(false);
+  const [seatsRefreshKey, setSeatsRefreshKey] = useState(0);
   // 서버에서 불러온 실제 혼잡도(손님 화면과 동일한 값). 아직 못 불러왔으면
   // null이고, 그동안은 좌석 수로 추정한 값을 화면에 보여줘요.
   const [serverCongestion, setServerCongestion] = useState<CongestionLevel | null>(null);
@@ -514,31 +529,46 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   // NEXT_PUBLIC_API_BASE_URL이 아직 없거나 storeId를 모르면 fetchTodaySales가
   // 바로 null을 돌려주기 때문에 이 시점엔 네트워크 요청 없이 기존 mock 데이터가
   // 그대로 화면에 남아요.
+  // ⚠️ 예전엔 storeId가 생기는 시점에 딱 한 번만 불러오고 끝이라(salesRefreshKey도
+  // 아무도 바꾸지 않아서 사실상 미사용 변수였어요), 그 뒤에 손님이 실제로 결제를
+  // 완료해도 "오늘 매출" 카드는 로그인 시점 값에 계속 멈춰 있었어요. 주문/좌석과
+  // 똑같이 8초마다 다시 불러오고, 다른 탭을 보다가 이 화면으로 돌아오면(포커스/
+  // 가시성 복귀) 즉시 한 번 더 불러오도록 해서 실제 결제 내역이 반영되게 해요.
   useEffect(() => {
     if (!ownerStoreId) return;
     let cancelled = false;
-    setSalesLoading(true);
-    setSalesError(null);
-
-    fetchTodaySales(ownerStoreId)
-      .then((result) => {
-        if (cancelled) return;
-        if (result) {
-          setTodaySalesByHour(result.hourly);
-          setYesterdayTotalSales(result.yesterdayTotal);
-        }
-        // result가 null이면(연동 전이거나 일시적 오류) 기존 값을 그대로 유지해요.
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setSalesError("매출 데이터를 불러오지 못했어요.");
-      })
-      .finally(() => {
-        if (!cancelled) setSalesLoading(false);
-      });
-
+    const load = () => {
+      setSalesLoading(true);
+      setSalesError(null);
+      fetchTodaySales(ownerStoreId)
+        .then((result) => {
+          if (cancelled) return;
+          if (result) {
+            setTodaySalesByHour(result.hourly);
+            setYesterdayTotalSales(result.yesterdayTotal);
+          }
+          // result가 null이면(연동 전이거나 일시적 오류) 기존 값을 그대로 유지해요.
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setSalesError("매출 데이터를 불러오지 못했어요.");
+        })
+        .finally(() => {
+          if (!cancelled) setSalesLoading(false);
+        });
+    };
+    load();
+    const interval = setInterval(load, 8000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", load);
     return () => {
       cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", load);
     };
   }, [ownerStoreId, salesRefreshKey]);
 
@@ -548,15 +578,25 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   // ownerStoreId 캐시 여부와 상관없이 로그인만 돼 있으면 항상 불러올 수 있어요.
   useEffect(() => {
     if (!isOwnerLoggedIn) return;
+    if (!isApiConfigured()) return; // 목데이터 모드 — "못 불러온 것"이 아니라 애초에 서버가 없는 상태예요.
     let cancelled = false;
+    setSeatsLoading(true);
     apiOwnerListSeats().then((rows) => {
-      if (cancelled || !rows) return;
+      if (cancelled) return;
+      setSeatsLoading(false);
+      if (!rows) {
+        setSeatsLoadFailed(true);
+        return;
+      }
+      setSeatsLoadFailed(false);
       setSeats(rows.map(mapApiSeatToOwnerSeat));
     });
     return () => {
       cancelled = true;
     };
-  }, [isOwnerLoggedIn]);
+  }, [isOwnerLoggedIn, seatsRefreshKey]);
+
+  const retrySeatsLoad = () => setSeatsRefreshKey((k) => k + 1);
 
   // 매장 메뉴 목록을 서버에서 불러와요.
   // ⚠️ 다른 화면(좌석/매출/매장 프로필)과 달리 메뉴 조회·등록은 storeId를 URL에
@@ -595,6 +635,12 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   // 안 된다"는 문제). 진짜 웹소켓 없이도 체감상 실시간처럼 보이도록 8초마다
   // 다시 불러오고, 다른 탭을 보다가 이 화면으로 돌아오면(포커스/가시성 복귀)
   // 즉시 한 번 더 불러와요.
+  // 이미 "완료"로 확인한 주문 id들. 폴링으로 새로 "완료" 상태인 주문을
+  // 발견하면(이 화면의 완료 버튼이 아니라 다른 기기나 Swagger 등 다른 경로로
+  // 완료 처리된 경우 포함) 오늘 매출을 바로 다시 불러와요 — 그래야 "분명
+  // 주문을 완료 처리했는데 사장님 메인의 오늘 매출엔 반영이 안 된다"는 문제가
+  // (다음 8초 폴링을 기다리지 않고) 바로 해결돼요.
+  const knownCompletedOrderIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!ownerStoreId) return;
     let cancelled = false;
@@ -602,7 +648,15 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
       const reqId = ++ordersRequestIdRef.current;
       apiOwnerListStoreOrders(ownerStoreId).then((rows) => {
         if (cancelled || !rows || reqId !== ordersRequestIdRef.current) return;
-        setOrders(rows.map(mapApiOrderToOwnerOrder));
+        const mapped = rows.map(mapApiOrderToOwnerOrder);
+        setOrders(mapped);
+        const newlyCompleted = mapped.some(
+          (o) => o.status === "완료" && !knownCompletedOrderIdsRef.current.has(o.id),
+        );
+        knownCompletedOrderIdsRef.current = new Set(
+          mapped.filter((o) => o.status === "완료").map((o) => o.id),
+        );
+        if (newlyCompleted) refetchSales();
       });
     };
     load();
@@ -830,17 +884,31 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   // "잔여 좌석" 계산(GET /api/stores/{store}/congestion)의 원본 데이터라서,
   // 여기서 저장이 안 되면 손님 화면도 절대 실시간으로 안 바뀌어요.
   const setSeatStatus = (id: string, status: SeatState) => {
+    const prevStatus = seats.find((s) => s.id === id)?.status;
     setSeats((prev) => prev.map((s) => (s.id === id ? { ...s, status } : s)));
-    if (isOwnerLoggedIn && !isTempSeatId(id)) {
-      void apiOwnerUpdateSeat(id, seatStateToApiStatus(status));
-    }
+    if (!isOwnerLoggedIn || isTempSeatId(id) || !isApiConfigured()) return;
+    void apiOwnerUpdateSeat(id, seatStateToApiStatus(status)).then((ok) => {
+      if (ok) {
+        setSeatSyncError(null);
+        return;
+      }
+      // 저장 실패 — 화면이 실제로 저장된 상태와 다르게 보이지 않도록 원래
+      // 상태로 되돌리고, 왜 안 됐는지 안내해요("눌러도 반영이 안 되는 것
+      // 같다"는 혼란의 원인이 바로 이 조용한 실패였어요).
+      if (prevStatus) {
+        setSeats((prev) => prev.map((s) => (s.id === id ? { ...s, status: prevStatus } : s)));
+      }
+      setSeatSyncError(
+        "좌석 상태 저장에 실패했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인해주세요.",
+      );
+    });
   };
 
   const addSeat = (label: string) => {
     const tempId = `seat-${makeUniqueSuffix()}`;
     setSeats((prev) => [...prev, { id: tempId, label, status: "비어있음" }]);
 
-    if (!isOwnerLoggedIn) return;
+    if (!isOwnerLoggedIn || !isApiConfigured()) return;
     // seat_code/seat_type/capacity/floor_number는 화면에 입력칸이 없어서
     // 합리적인 기본값으로 채워요(좌석 이름만 실제로 사장님이 입력한 값이에요).
     // seat_code는 매장 안에서 고유해야 해서 makeUniqueSuffix()로 만들어요.
@@ -855,10 +923,16 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
         // ⚠️ 서버 저장에 실패했는데 화면엔 임시 좌석이 그대로 남아있으면,
         // 그 좌석은 실제로 존재하지 않는데도(가짜 id) 이후 +/-·상태변경·삭제를
         // 시도할 때마다 서버 요청이 조용히 실패하는 "꼬인" 상태가 계속돼요.
-        // 실패한 임시 좌석은 화면에서도 지워서 항상 서버와 같은 상태를 보여줘요.
+        // 실패한 임시 좌석은 화면에서도 지워서 항상 서버와 같은 상태를 보여주고,
+        // 대신 왜 사라졌는지 안내를 남겨요(예전엔 여기서 조용히 사라지기만
+        // 해서 "숫자를 입력해도 아무 반응이 없다"는 것처럼 보였어요).
         setSeats((prev) => prev.filter((s) => s.id !== tempId));
+        setSeatSyncError(
+          "좌석 저장에 실패했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인해주세요.",
+        );
         return;
       }
+      setSeatSyncError(null);
       // 서버가 발급한 진짜 id로 교체해요. (이후 상태변경/삭제가 서버에도 반영되도록)
       setSeats((prev) =>
         prev.map((s) => (s.id === tempId ? { ...s, id: String(created.id) } : s))
@@ -867,8 +941,76 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   };
 
   const removeSeat = (id: string) => {
+    const removed = seats.find((s) => s.id === id);
     setSeats((prev) => prev.filter((s) => s.id !== id));
-    if (isOwnerLoggedIn && !isTempSeatId(id)) void apiOwnerDeleteSeat(id);
+    if (!isOwnerLoggedIn || isTempSeatId(id) || !isApiConfigured()) return;
+    void apiOwnerDeleteSeat(id).then((ok) => {
+      if (ok) {
+        setSeatSyncError(null);
+        return;
+      }
+      // 삭제 실패 — 되돌려서 서버와 다시 맞추고 안내해요.
+      if (removed) setSeats((prev) => [...prev, removed]);
+      setSeatSyncError(
+        "좌석 삭제에 실패했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인해주세요.",
+      );
+    });
+  };
+
+  /** 좌석을 전부 지워요. 서버 연결이 끊긴 동안 "좌석 만들기"를 여러 번 눌러
+   * 번호가 겹치는 좌석이 쌓였을 때, 하나씩 지우는 대신 한 번에 정리하고 맨
+   * 위 "전체 좌석 수"로 다시 깔끔하게 만들 수 있게 하는 용도예요.
+   *
+   * ⚠️ 예전엔 이 함수가 seats를 순회하며 removeSeat()을 하나씩 불렀는데,
+   * removeSeat은 "먼저 화면에서 지우고, 서버 삭제가 실패하면 되돌리는"
+   * 낙관적 업데이트 방식이었어요. 그래서 백엔드에 접속이 안 되는 상황(예:
+   * 192.168.x.x가 지금 이 기기에서 응답이 없을 때)에서 "초기화"를 누르면:
+   *   1) 좌석들이 화면에서 일단 전부(0개로) 사라지고,
+   *   2) 화면이 total===0으로 판단해 "아직 좌석이 없어요 + 좌석 만들기"
+   *      입력칸을 바로 띄우고,
+   *   3) 그 사이 사장님이 그 입력칸에 숫자를 넣고 "좌석 만들기"를 누르면
+   *      새 좌석(1, 2, 3...)이 만들어지는데,
+   *   4) 뒤늦게 아까 그 삭제 요청들이 전부 실패로 돌아오면서 removeSeat이
+   *      "삭제 안 됐다"며 원래 좌석들을 다시 화면에 되살려서,
+   *   5) 결국 새로 만든 좌석 + 되살아난 옛 좌석이 뒤섞여 번호(라벨)가
+   *      겹치는 좌석들(예: "1"이 여러 개)이 함께 보이는 사고로 이어졌어요.
+   *
+   * 지금은 모든 삭제 요청을 먼저 다 보내고 "결과가 전부 돌아올 때까지"
+   * 기다린 다음, 실제로 서버에서 지워진 좌석만 화면에서도 지워요. 하나라도
+   * 실패하면 그 좌석은 화면에도 그대로 남겨서 "총 좌석 수"가 실제와 다르게
+   * (섣불리 0으로) 보이지 않게 하고, 그래서 "좌석 만들기" 화면도 뜨지 않아
+   * 위 3)번 같은 중복 생성 자체가 아예 불가능해요. 진행 중엔 seatsResetting을
+   * true로 둬서 화면(초기화 버튼 등)이 중복 클릭을 막을 수 있게 해요. */
+  const resetAllSeats = () => {
+    if (seatsResetting || seats.length === 0) return;
+    const targets = seats;
+    setSeatsResetting(true);
+    setSeatSyncError(null);
+
+    Promise.all(
+      targets.map(async (seat) => {
+        // 임시 id(서버 응답을 기다리는 중 생성된 좌석)는 서버에 아직 없으니
+        // API 호출 없이 그냥 화면에서 지워도 안전해요.
+        if (isTempSeatId(seat.id) || !isOwnerLoggedIn || !isApiConfigured()) {
+          return { seat, ok: true };
+        }
+        const ok = await apiOwnerDeleteSeat(seat.id);
+        return { seat, ok };
+      }),
+    ).then((outcomes) => {
+      const failedIds = new Set(
+        outcomes.filter((o) => !o.ok).map((o) => o.seat.id),
+      );
+      setSeats((prev) => prev.filter((s) => failedIds.has(s.id)));
+      setSeatsResetting(false);
+      if (failedIds.size > 0) {
+        setSeatSyncError(
+          `좌석 ${failedIds.size}개는 삭제하지 못했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인한 뒤 다시 시도해주세요.`,
+        );
+      } else {
+        setSeatSyncError(null);
+      }
+    });
   };
 
   // ⚠️ 예전엔 서버 응답 성공 여부를 확인하지 않고(fire-and-forget) 화면만 먼저
@@ -908,7 +1050,13 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
       if (prevStatus) {
         setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status: prevStatus! } : o)));
       }
+      return;
     }
+    // ⚠️ 주문을 "완료"로 바꾸면 그게 곧 실제 매출이 발생한 시점인데, 홈 화면의
+    // "오늘 매출" 카드는 8초 폴링이나 페이지 재방문 전까지는 갱신되지 않았어요.
+    // 그래서 방금 완료 처리한 주문 금액이 매출에 안 잡힌 것처럼 보였어요.
+    // 완료 처리가 서버에 성공하자마자 매출을 바로 다시 불러와요.
+    if (nextStatus === "완료") refetchSales();
   };
 
   const acceptOrder = (id: string) => void updateOrderStatus(id, "준비중", "CONFIRMED");
@@ -1032,6 +1180,9 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   const addSalesPoint = (point: SalesPoint) =>
     setTodaySalesByHour((prev) => [...prev, point]);
 
+  // todaySalesByHour는 "그 시간대까지의 누적 매출"이라서(api.ts에서 시간
+  // 순서로 정렬해 내려줘요), 가장 늦은 시간대(=배열 마지막 값)가 곧 오늘
+  // 지금까지의 총 매출이에요.
   const todaySales =
     todaySalesByHour.length > 0
       ? todaySalesByHour[todaySalesByHour.length - 1].amount
@@ -1050,6 +1201,12 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
       setSeatStatus,
       addSeat,
       removeSeat,
+      resetAllSeats,
+      seatsLoading,
+      seatsLoadFailed,
+      seatsResetting,
+      retrySeatsLoad,
+      seatSyncError,
       congestion,
       orders,
       acceptOrder,
@@ -1079,6 +1236,10 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
     [
       store,
       seats,
+      seatSyncError,
+      seatsLoading,
+      seatsLoadFailed,
+      seatsResetting,
       serverCongestion,
       orders,
       menu,

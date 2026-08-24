@@ -19,41 +19,25 @@ function SocialLoginCallback() {
   const searchParams = useSearchParams();
   const { loginWithSocialCode } = useAuth();
   const [error, setError] = useState<string | null>(null);
+
   const processed = useRef(false);
 
   useEffect(() => {
     if (processed.current) return;
     processed.current = true;
 
-    const errorParam = searchParams.get("error");
-    const message = searchParams.get("message");
     const code = searchParams.get("code");
+    if (!code) return;
 
-    if (errorParam) {
-      setError(message || "소셜 로그인에 실패했어요. 다시 시도해주세요.");
-      return;
-    }
-
-    if (!code) {
-      setError("잘못된 접근이에요. 다시 로그인해주세요.");
-      return;
-    }
-
-    let cancelled = false;
     (async () => {
       const result = await loginWithSocialCode(code);
-      if (cancelled) return;
+
       if (result.ok) {
         router.replace("/map");
       } else {
         setError(result.error);
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
   return (

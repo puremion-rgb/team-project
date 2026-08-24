@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Header from "@/components/Header";
 import Button from "@/components/Button";
-import ImageUploadField from "@/components/owner/ImageUploadField";
+import ImageUploadField from "@/components/customer/ProfileImageUploadField";
 import Toast from "@/components/Toast";
 import { useAuth } from "@/lib/auth-store";
 

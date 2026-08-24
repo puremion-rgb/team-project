@@ -1,9 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChevronLeft, Heart, Navigation, Star } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Heart,
+  Navigation,
+  Share2,
+  Star,
+  X,
+} from "lucide-react";
 import ImagePlaceholder from "@/components/ImagePlaceholder";
 import StatusBadge from "@/components/StatusBadge";
 import AmenityIcon from "@/components/AmenityIcon";
@@ -12,8 +21,29 @@ import { useReviews } from "@/lib/reviews-store";
 import { useWishlist } from "@/lib/wishlist-store";
 import { useStores } from "@/lib/stores-store";
 import { useAuth } from "@/lib/auth-store";
-import { apiGetStoreMenus, isApiConfigured, resolveImageUrl, type ApiMenu } from "@/lib/api";
+import {
+  apiGetStoreMenus,
+  apiGetStoreReviews,
+  isApiConfigured,
+  resolveImageUrl,
+  extractReplyContent,
+  extractReviewImageUrls,
+  type ApiMenu,
+  type ApiReview,
+} from "@/lib/api";
 import { useCart } from "@/lib/cart-store";
+
+/** 화면에 보여줄 리뷰 한 건. 서버 리뷰(모든 손님이 씀)와 이 기기에 남아있는
+ * 로컬 리뷰(방금 등록해서 아직 서버 목록에 안 잡혔을 수 있는 내 리뷰)를
+ * 합쳐서 같은 모양으로 다뤄요. */
+type DisplayReview = {
+  id: string;
+  rating: number;
+  content: string;
+  date: string;
+  reply: string | null;
+  images: string[];
+};
 
 export default function CafeDetailPage({ params }: { params: { id: string } }) {
   const router = useRouter();
@@ -55,9 +85,143 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
   const { isLiked, toggleLike } = useWishlist();
   const cafeId = cafe?.id ?? params.id;
   const liked = isLiked(cafeId);
-  const { reviews } = useReviews();
-  const cafeReviews = reviews.filter((r) => r.cafeId === cafeId);
-  const cafePhotos = cafeReviews.flatMap((r) => r.images ?? []);
+
+  // ⚠️ 예전엔 이 "리뷰" 탭이 reviews-store(이 기기에서 이 앱으로 작성한 리뷰
+  // 캐시)만 보고 있었어요. 그래서 (1) 다른 손님이 쓴 리뷰는 전혀 안 보이고,
+  // (2) 카페 상세 상단 "리뷰 0" 배지·탭 숫자는 항상 cafe.reviewCount(서버가
+  // 아직 안 내려주는 값이라 고정 0)를 써서 실제로 리뷰를 등록해도 계속 0으로
+  // 보였어요. 이제 GET /api/stores/{store}/reviews로 이 매장에 달린 진짜 리뷰
+  // 전체를 불러와서 개수·평균 별점·목록을 모두 여기서 직접 계산해요.
+  const { reviews: myLocalReviews } = useReviews();
+  const myCafeReviews = myLocalReviews.filter((r) => r.cafeId === cafeId);
+
+  const [serverReviews, setServerReviews] = useState<ApiReview[] | null>(null);
+  const [reviewsLoading, setReviewsLoading] = useState(false);
+  useEffect(() => {
+    if (!isApiConfigured()) {
+      setServerReviews(null);
+      return;
+    }
+    let cancelled = false;
+    setReviewsLoading(true);
+    apiGetStoreReviews(cafeId).then((rows) => {
+      if (cancelled) return;
+      setServerReviews(rows);
+      setReviewsLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cafeId]);
+
+  const displayReviews = useMemo<DisplayReview[]>(() => {
+    const localById = new Map(myCafeReviews.map((r) => [r.id, r]));
+    const serverIds = new Set((serverReviews ?? []).map((r) => String(r.id)));
+
+    const fromServer: DisplayReview[] = (serverReviews ?? []).map((r) => {
+      const localMatch = localById.get(String(r.id));
+      return {
+        id: String(r.id),
+        rating: r.rating,
+        content: r.content,
+        date: r.created_at ? r.created_at.slice(0, 10).replace(/-/g, ".") : (localMatch?.date ?? ""),
+        // ⚠️ r.reply는 문자열이 아니라 {id, review_id, author_id, content,
+        // created_at, updated_at, author} 객체로 내려와요. 객체를 그대로
+        // 렌더링하면 "Objects are not valid as a React child" 런타임 에러가
+        // 나서, 반드시 extractReplyContent로 답글 본문 문자열만 꺼내요.
+        reply: extractReplyContent(r.reply),
+        // ⚠️ r.images는 문자열 배열이 아니라 {id, review_id, image_url,
+        // alt_text, sort_order} 객체 배열로 내려와요. extractReviewImageUrls로
+        // 실제 사진 URL 문자열만 꺼내요. 서버가 아직 이 리뷰의 사진을 못
+        // 내려주는 경우(구버전 응답 등)엔 이 기기에 남아있는 내 리뷰의 로컬
+        // 업로드 사진으로 대신 보여줘요.
+        images:
+          localMatch?.images && localMatch.images.length > 0
+            ? localMatch.images
+            : extractReviewImageUrls(r.images),
+      };
+    });
+
+    // 방금 등록해서 아직 서버 목록에 안 잡힌(=폴링 지연) 내 리뷰만 추가해요.
+    const localOnly: DisplayReview[] = myCafeReviews
+      .filter((r) => !serverIds.has(r.id))
+      .map((r) => ({
+        id: r.id,
+        rating: r.rating,
+        content: r.content,
+        date: r.date,
+        reply: null,
+        images: r.images ?? [],
+      }));
+
+    return [...fromServer, ...localOnly].sort((a, b) => b.date.localeCompare(a.date));
+  }, [serverReviews, myCafeReviews]);
+
+  // API 연동이 아직 안 됐거나(개발 초기) 응답을 못 받아온 동안에는 이 기기의
+  // 로컬 리뷰 개수로라도 보여줘서 화면이 항상 "0"으로 굳어 보이지 않게 해요.
+  const reviewCount = serverReviews !== null ? displayReviews.length : myCafeReviews.length;
+  const avgRating =
+    displayReviews.length > 0
+      ? Math.round(
+          (displayReviews.reduce((sum, r) => sum + r.rating, 0) / displayReviews.length) * 10,
+        ) / 10
+      : 0;
+
+  const cafePhotos = displayReviews.flatMap((r) => r.images);
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+
+  // ⚠️ 예전엔 상단 캐러셀이 매장 대표 이미지 + 손님 리뷰 사진들을 이어붙여서
+  // 보여줬어요. 그런데 사장님이 프로필에 등록한 사진이 아닌 손님이 남긴 리뷰
+  // 사진까지 대표 캐러셀에 섞여 보이는 게 어색해서, 이제 매장 대표 이미지
+  // 하나만 보여줘요(리뷰 사진은 "사진" 탭에서만 보여요).
+  const heroSlides = useMemo(() => {
+    return cafe?.imageUrl ? [cafe.imageUrl] : [];
+  }, [cafe?.imageUrl]);
+  const [heroIndex, setHeroIndex] = useState(0);
+  useEffect(() => {
+    if (heroIndex >= heroSlides.length) setHeroIndex(0);
+  }, [heroSlides.length, heroIndex]);
+
+  const [tagsExpanded, setTagsExpanded] = useState(false);
+  // ⚠️ "태그 4개인데 왜 접혀서 나오냐(펼치면 한 줄에 다 들어가는데)"라는 문제의
+  // 원인: 예전엔 태그가 4개보다 많으면 무조건 앞 4개만 보여주고 나머지를
+  // 접어버렸어요(개수만 보고 판단). 그런데 태그 글자 길이가 짧으면 5개, 6개도
+  // 실제로는 한 줄에 다 들어가는데도 똑같이 접혀서, 펼쳐보면 "어차피 한 줄에
+  // 다 들어가는데 왜 접었지?"처럼 보였어요. 이제는 개수 대신 "실제로 한 줄
+  // 폭을 넘치는지"를 직접 측정해서, 진짜로 넘칠 때만 더보기 버튼을 보여줘요.
+  const tagsRowRef = useRef<HTMLDivElement>(null);
+  const [tagsOverflow, setTagsOverflow] = useState(false);
+  const [tagsLineHeight, setTagsLineHeight] = useState<number | null>(null);
+  useEffect(() => {
+    const el = tagsRowRef.current;
+    if (!el || !cafe?.tags || cafe.tags.length === 0) return;
+    const measure = () => {
+      const firstChild = el.firstElementChild as HTMLElement | null;
+      const lineHeight = firstChild?.getBoundingClientRect().height ?? 0;
+      if (lineHeight > 0) setTagsLineHeight(lineHeight);
+      // scrollHeight가 한 줄 높이보다 눈에 띄게 크면(줄바꿈 발생) 실제로 넘친 것.
+      setTagsOverflow(lineHeight > 0 && el.scrollHeight > lineHeight * 1.5);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [cafe?.tags]);
+
+  const handleShare = () => {
+    if (typeof window === "undefined") return;
+    const url = window.location.href;
+    if (navigator.share) {
+      navigator.share({ title: cafe?.name, url }).catch(() => {});
+    } else if (navigator.clipboard) {
+      navigator.clipboard.writeText(url).catch(() => {});
+    }
+  };
 
   // 서버에서 아직 목록을 못 받아왔거나(로딩 중) 존재하지 않는 id면 안내만 보여줘요.
   // (예전처럼 엉뚱한 mock 카페로 조용히 대체하지 않아요.)
@@ -110,13 +274,35 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
   return (
     <div className="flex min-h-full flex-col">
       <div className="relative">
-        <ImagePlaceholder
-          rounded="rounded-none"
-          className="h-64 w-full"
-          iconSize={30}
-          src={cafe.imageUrl}
-          alt={cafe.name}
-        />
+        {heroSlides.length > 0 ? (
+          <div
+            className="flex h-64 w-full snap-x snap-mandatory overflow-x-auto"
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              const i = Math.round(el.scrollLeft / el.clientWidth);
+              if (i !== heroIndex) setHeroIndex(i);
+            }}
+          >
+            {heroSlides.map((src, i) => (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                key={`${src}-${i}`}
+                src={src}
+                alt={`${cafe.name} 사진 ${i + 1}`}
+                className="h-64 w-full shrink-0 snap-center bg-[#DDD9CC] object-cover"
+              />
+            ))}
+          </div>
+        ) : (
+          <ImagePlaceholder
+            rounded="rounded-none"
+            className="h-64 w-full"
+            iconSize={30}
+            src={null}
+            alt={cafe.name}
+          />
+        )}
+
         <button
           aria-label="뒤로가기"
           onClick={() => router.back()}
@@ -124,39 +310,68 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
         >
           <ChevronLeft size={22} />
         </button>
+
+        <div className="absolute right-4 top-4 flex items-center gap-2">
+          <button
+            aria-label="찜하기"
+            onClick={() => toggleLike(cafe.id)}
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-white/90"
+          >
+            <Heart
+              size={18}
+              className={liked ? "fill-brand text-brand" : "text-ink"}
+              strokeWidth={1.8}
+            />
+          </button>
+          {/* ⚠️ 예전엔 여기가 점 세개(더보기) 버튼이었고, 눌러야 나오는 메뉴
+              안에 "공유하기" 하나만 들어있었어요. 항목이 하나뿐이라 한 번 더
+              누르게 만들 이유가 없어서, 바로 공유하기 아이콘 버튼으로 바꿨어요. */}
+          <button
+            aria-label="공유하기"
+            onClick={handleShare}
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-white/90 text-ink"
+          >
+            <Share2 size={16} strokeWidth={1.8} />
+          </button>
+        </div>
+
+        {heroSlides.length > 1 && (
+          <span className="absolute bottom-3 right-3 rounded-full bg-black/60 px-2.5 py-1 text-[12px] font-bold text-white">
+            {heroIndex + 1} / {heroSlides.length}
+          </span>
+        )}
       </div>
 
       <div className="px-6 pt-5">
         <div className="flex items-start justify-between">
           <h1 className="text-[22px] font-bold text-ink">{cafe.name}</h1>
-          <div className="flex items-center gap-3">
-            <p className="flex items-center gap-1 text-[13.5px] text-ink-secondary">
-              <Star size={14} className="fill-amber text-amber" />
-              {cafe.rating} ({cafe.reviewCount})
-            </p>
-            {/* 하단의 큰 "길찾기/메뉴 보고 주문하기" 버튼 두 개를 없애면서, 길찾기는
-                여기 별점/찜 옆에 작은 버튼으로 옮겨왔어요. */}
-            <Link
-              href={`/cafe/${cafe.id}/route`}
-              aria-label="길찾기"
-              className="flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-[12.5px] font-bold text-ink-secondary"
-            >
-              <Navigation size={12} />
-              길찾기
-            </Link>
-            <button aria-label="찜하기" onClick={() => toggleLike(cafe.id)}>
-              <Heart
-                size={22}
-                className={liked ? "fill-brand text-brand" : "text-ink"}
-                strokeWidth={1.8}
-              />
-            </button>
-          </div>
+          <p className="flex items-center gap-1 text-[13.5px] font-bold text-ink-secondary">
+            <Star size={14} className="fill-amber text-amber" />
+            {avgRating} ({reviewCount})
+          </p>
         </div>
 
-        <div className="mt-3 flex items-center gap-3">
-          <StatusBadge status={cafe.status} filled={cafe.seatsFilled} total={cafe.seatsTotal} />
-          <span className="text-[12.5px] text-ink-muted">{cafe.updatedAgo}</span>
+        {cafe.description && (
+          <p className="mt-1.5 text-[13.5px] leading-relaxed text-ink-secondary">
+            {cafe.description}
+          </p>
+        )}
+
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge status={cafe.status} filled={cafe.seatsFilled} total={cafe.seatsTotal} />
+            <span className="text-[12.5px] text-ink-muted">{cafe.updatedAgo}</span>
+          </div>
+          {/* 하단의 큰 "길찾기/메뉴 보고 주문하기" 버튼 두 개를 없애면서, 길찾기는
+              여기 상태 배지 옆 작은 pill 버튼으로 옮겨왔어요. */}
+          <Link
+            href={`/cafe/${cafe.id}/route`}
+            aria-label="길찾기"
+            className="flex shrink-0 items-center gap-1 rounded-full bg-brand px-3 py-1.5 text-[12.5px] font-bold text-white"
+          >
+            <Navigation size={12} />
+            길찾기
+          </Link>
         </div>
 
         <div className="mt-5 grid grid-cols-4 gap-2.5">
@@ -171,17 +386,40 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
         </div>
 
         {/* 사장님이 매장 프로필에서 지정한 태그. amenities 아이콘과 달리 커스텀
-            태그까지 이름 그대로 보여줘요(없으면 아예 표시 안 함). */}
+            태그까지 이름 그대로 보여줘요(없으면 아예 표시 안 함). 태그 전체가
+            한 줄 폭을 실제로 넘칠 때만 접어두고 화살표로 펼칠 수 있게 해요. */}
         {cafe.tags && cafe.tags.length > 0 && (
-          <div className="mt-4 flex flex-wrap gap-1.5">
-            {cafe.tags.map((tag) => (
-              <span
-                key={tag}
-                className="rounded-full bg-cream px-3 py-1 text-[12.5px] font-medium text-ink-secondary"
+          <div className="mt-4 flex items-start gap-1.5">
+            <div
+              ref={tagsRowRef}
+              style={
+                !tagsExpanded && tagsOverflow && tagsLineHeight
+                  ? { maxHeight: tagsLineHeight, overflow: "hidden" }
+                  : undefined
+              }
+              className="flex flex-1 flex-wrap items-center gap-1.5"
+            >
+              {cafe.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded-full bg-cream px-3 py-1 text-[12.5px] font-medium text-ink-secondary"
+                >
+                  #{tag}
+                </span>
+              ))}
+            </div>
+            {tagsOverflow && (
+              <button
+                aria-label={tagsExpanded ? "태그 접기" : "태그 더보기"}
+                onClick={() => setTagsExpanded((v) => !v)}
+                className="flex h-6 w-6 shrink-0 items-center justify-center text-ink-muted"
               >
-                #{tag}
-              </span>
-            ))}
+                <ChevronDown
+                  size={16}
+                  className={tagsExpanded ? "rotate-180 transition-transform" : "transition-transform"}
+                />
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -196,7 +434,7 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
               (tab === t ? "border-brand text-brand" : "border-transparent text-ink-muted")
             }
           >
-            {t === "리뷰" ? `리뷰 ${cafe.reviewCount}` : t}
+            {t === "리뷰" ? `리뷰 ${reviewCount}` : t === "사진" ? `사진 ${cafePhotos.length}` : t}
           </button>
         ))}
       </div>
@@ -245,13 +483,17 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
         // 완료된 주문 하나를 인증으로 남겨야 해서(주문내역 > 주문 상세 >
         // 리뷰 남기기), 여기서는 작성 진입점 없이 리뷰만 보여줘요.
         <div className="flex flex-col gap-4 px-6 py-6">
-          {cafeReviews.length === 0 ? (
+          {reviewsLoading && displayReviews.length === 0 ? (
+            <p className="mt-8 text-center text-[14px] text-ink-muted">
+              리뷰를 불러오는 중이에요...
+            </p>
+          ) : displayReviews.length === 0 ? (
             <p className="mt-8 text-center text-[14px] text-ink-muted">
               아직 작성된 리뷰가 없어요.
             </p>
           ) : (
             <div className="flex flex-col gap-3">
-              {cafeReviews.map((r) => (
+              {displayReviews.map((r) => (
                 <div key={r.id} className="rounded-2xl border border-border bg-white p-5">
                   <div className="flex items-center gap-2">
                     <StarRating rating={r.rating} />
@@ -260,6 +502,37 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
                   <p className="mt-3 text-[14px] leading-relaxed text-ink-secondary">
                     {r.content}
                   </p>
+                  {r.images.length > 0 && (
+                    <div className="mt-3 flex gap-2 overflow-x-auto">
+                      {r.images.map((src, i) => {
+                        const globalIndex = cafePhotos.indexOf(src);
+                        return (
+                          <button
+                            key={`${src}-${i}`}
+                            type="button"
+                            onClick={() => setLightboxIndex(globalIndex >= 0 ? globalIndex : 0)}
+                            className="shrink-0"
+                          >
+                            <ImagePlaceholder
+                              className="h-16 w-16"
+                              iconSize={14}
+                              src={resolveImageUrl(src)}
+                              alt={`리뷰 사진 ${i + 1}`}
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {/* 사장님이 답글을 남기면 손님 쪽 리뷰 화면에도 그대로 보여요. */}
+                  {r.reply && (
+                    <div className="mt-3 rounded-xl bg-cream p-3">
+                      <p className="text-[12.5px] font-bold text-brand">사장님 답글</p>
+                      <p className="mt-1 text-[13.5px] leading-relaxed text-ink-secondary">
+                        {r.reply}
+                      </p>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -274,7 +547,7 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
       {tab === "사진" && (
         // ⚠️ 예전엔 여기가 항상 회색 아이콘 6칸짜리 가짜 그리드였어요(리뷰 사진과
         // 전혀 연결이 안 돼 있었어요). 이제 이 카페에 달린 리뷰들에서 실제로 첨부된
-        // 사진(review.images, 서버에 업로드된 실제 URL)만 모아서 보여줘요.
+        // 사진만 모아서 보여주고, 탭하면 크게 하나씩 볼 수 있어요.
         cafePhotos.length === 0 ? (
           <p className="mt-8 text-center text-[14px] text-ink-muted">
             아직 등록된 사진이 없어요. 리뷰에 사진을 첨부해보세요!
@@ -282,17 +555,80 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
         ) : (
           <div className="grid grid-cols-3 gap-1.5 px-6 py-6">
             {cafePhotos.map((src, i) => (
-              <ImagePlaceholder
+              <button
                 key={`${src}-${i}`}
+                type="button"
+                onClick={() => setLightboxIndex(i)}
                 className="aspect-square"
-                iconSize={16}
-                src={src}
-                alt={`${cafe.name} 리뷰 사진 ${i + 1}`}
-              />
+              >
+                <ImagePlaceholder
+                  className="h-full w-full"
+                  iconSize={16}
+                  src={resolveImageUrl(src)}
+                  alt={`${cafe.name} 리뷰 사진 ${i + 1}`}
+                />
+              </button>
             ))}
           </div>
         )
       )}
+
+      {/* 사진 하나씩 크게 보기(라이트박스). 이전/다음으로 넘기고, 바깥이나 X를
+          누르면 닫혀요. */}
+      {lightboxIndex !== null && cafePhotos.length > 0 && (
+        <div
+          className="fixed inset-0 z-50 flex flex-col bg-black/90"
+          onClick={() => setLightboxIndex(null)}
+        >
+          <div className="flex items-center justify-between px-4 pt-4">
+            <span className="text-[13px] font-bold text-white/80">
+              {lightboxIndex + 1} / {cafePhotos.length}
+            </span>
+            <button
+              aria-label="닫기"
+              onClick={() => setLightboxIndex(null)}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-white"
+            >
+              <X size={20} />
+            </button>
+          </div>
+
+          <div className="relative flex flex-1 items-center justify-center px-4">
+            {lightboxIndex > 0 && (
+              <button
+                aria-label="이전 사진"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setLightboxIndex((i) => (i !== null ? i - 1 : i));
+                }}
+                className="absolute left-2 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white"
+              >
+                <ChevronLeft size={22} />
+              </button>
+            )}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={resolveImageUrl(cafePhotos[lightboxIndex]) ?? cafePhotos[lightboxIndex]}
+              alt={`리뷰 사진 ${lightboxIndex + 1}`}
+              onClick={(e) => e.stopPropagation()}
+              className="max-h-[75vh] max-w-full rounded-xl object-contain"
+            />
+            {lightboxIndex < cafePhotos.length - 1 && (
+              <button
+                aria-label="다음 사진"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setLightboxIndex((i) => (i !== null ? i + 1 : i));
+                }}
+                className="absolute right-2 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white"
+              >
+                <ChevronRight size={22} />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {cart.cafeId === cafe.id && cart.totalCount > 0 && (
         <div className="sticky bottom-0 z-20 px-6 pb-6 pt-3">
           <Link

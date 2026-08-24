@@ -70,7 +70,8 @@ export default function CafeListCard({
         </div>
         <p className="flex items-center gap-1 text-[13px] text-ink-secondary">
           <Star size={13} className="fill-amber text-amber" />
-          {cafe.rating} · {cafe.distance}
+          {cafe.rating} ({cafe.reviewCount})
+          {cafe.distance && cafe.distance !== "-" && ` · ${cafe.distance}`}
         </p>
         <div>
           <StatusBadge status={cafe.status} filled={cafe.seatsFilled} total={cafe.seatsTotal} />
