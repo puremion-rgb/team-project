@@ -101,14 +101,10 @@ export default function OwnerLoginPage() {
           <Circle size={16} className="fill-[#FEE500] text-[#FEE500]" />
           카카오로 로그인
         </button>
-        <button
-          type="button"
-          onClick={() => handleSocialLogin("naver")}
-          className="flex h-14 items-center justify-center gap-2 rounded-2xl border border-border bg-white text-[15px] font-medium text-ink"
-        >
-          <span className="font-extrabold text-[#03C75A]">N</span>
-          네이버로 로그인
-        </button>
+        {/* ⚠️ 2026-08-25: 네이버 로그인 버튼은 요청에 따라 화면에서만 잠시
+            뺐어요. handleSocialLogin("naver") 호출부와 api.ts의
+            SocialProvider="naver" 타입/로직은 그대로 남겨뒀으니, 나중에
+            네이버 로그인을 다시 켤 땐 이 버튼만 복원하면 돼요. */}
         <button
           type="button"
           onClick={() => handleSocialLogin("google")}

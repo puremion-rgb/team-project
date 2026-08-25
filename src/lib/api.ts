@@ -445,6 +445,25 @@ export type SocialAuthAs = "customer" | "owner";
  * 백엔드가 실제로 이 role 파라미터명을 그대로 쓰는지, 아니면 콜백 URL을 아예
  * 다르게 분리하는 방식(FRONTEND_SOCIAL_CALLBACK_URL을 손님/사장님용으로 각각 설정)을
  * 쓰는지는 백엔드 팀에 꼭 확인해주세요.
+ *
+ * ⚠️ 2026-08-25 "운영 API로 바꾸니 소셜 로그인이 안 돼요" 조사 결과 메모:
+ * 이 함수(getSocialLoginUrl)와 API_BASE_URL 계산(파일 상단)은 문제 없어요 —
+ * 백엔드가 전달한 "프론트엔드 운영 배포 안내" 문서(6번 표)의 콜백 주소가
+ *   https://wa26b01.yjjob.kr/auth/social/{google|kakao|naver}/callback
+ * 처럼 "/api" 없이 시작하는 것과 정확히 같은 패턴(/auth/social/{provider}/redirect)
+ * 으로 URL을 만들고 있어서, API_BASE_URL만 https://wa26b01.yjjob.kr/api로
+ * 바꾸면(파일 상단에서 끝의 "/api"는 자동으로 떼어내요) 이 함수는 그대로
+ * 잘 동작해요.
+ *
+ * 실제 원인은 이 리다이렉트 URL이 아니라, 로그인이 끝난 뒤 "어디로 돌아올지"를
+ * 정하는 백엔드 .env의 FRONTEND_SOCIAL_CALLBACK_URL(손님)/사장님용 값이에요.
+ * 이 값은 운영 백엔드(wa26b01.yjjob.kr)에는 보통 배포된 운영 프론트 주소로
+ * 맞춰져 있어서, 로컬(http://localhost:3000)에서 프론트만 띄워놓고 운영
+ * 백엔드로 소셜 로그인을 시도하면 로그인이 끝나도 로컬 화면으론 절대 안
+ * 돌아와요(다른 주소로 리다이렉트되니까요) — 이건 프론트 코드로 고칠 수
+ * 없고, 백엔드 팀에 "지금 테스트 중인 프론트 주소로 FRONTEND_SOCIAL_CALLBACK_URL이
+ * 맞춰져 있는지" 확인을 요청해야 해요. (자세한 설명: src/app/login/callback/page.tsx,
+ * src/app/owner/login/callback/page.tsx 상단 주석 참고)
  */
 export function getSocialLoginUrl(provider: SocialProvider, as: SocialAuthAs) {
   return `${API_BASE_URL}/auth/social/${provider}/redirect?role=${as}`;
