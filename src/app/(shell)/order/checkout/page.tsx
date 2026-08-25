@@ -9,7 +9,9 @@ import { useCart } from "@/lib/cart-store";
 import {
   apiCreateOrder,
   apiGetPaymentCheckout,
+  apiValidateCustomerSession,
   isApiConfigured,
+  setCustomerToken,
   lastCreateOrderError,
   lastPaymentCheckoutError,
   setOrderHint,
@@ -74,9 +76,25 @@ export default function OrderCheckoutPage() {
     };
   }, []);
 
-  const createOrder = () => {
+  const createOrder = async () => {
     setCreating(true);
     setCreateError(null);
+
+    // 주문 API와 결제 API는 모두 Bearer 인증이 필수예요. 예전 로그인 응답의
+    // 토큰이 없거나 만료됐는데도 주문 생성부터 호출하면 401만 보였어요. 먼저
+    // 서버에서 세션을 검증하고, 실패한 토큰은 지운 뒤 로그인 화면으로 보냅니다.
+    const session = await apiValidateCustomerSession();
+    if (!mountedRef.current) return;
+    if (session !== "valid") {
+      if (session === "invalid") setCustomerToken(null);
+      setCreating(false);
+      setCreateError(
+        session === "missing"
+          ? "로그인이 필요해요. 다시 로그인한 뒤 결제를 진행해주세요."
+          : "로그인 세션이 만료되었거나 서버가 토큰을 확인하지 못했어요. 다시 로그인해주세요.",
+      );
+      return;
+    }
 
     const snapshotItems = cart.items.map((i) => ({
       name: i.name,
@@ -85,13 +103,13 @@ export default function OrderCheckoutPage() {
     }));
     const snapshotAmount = finalAmount;
 
-    apiCreateOrder({
+    const order = await apiCreateOrder({
       store_id: Number(cart.cafeId),
       items: cart.items.map((i) => ({ menu_id: Number(i.id), quantity: i.quantity })),
       point_used: cart.pointUsed || undefined,
       user_coupon_id: cart.couponId ? Number(cart.couponId) : undefined,
-    }).then((order) => {
-      if (!mountedRef.current) return;
+    });
+    if (!mountedRef.current) return;
       // ⚠️ 예전엔 백엔드가 연동돼 있어도(isApiConfigured() === true) 주문
       // 생성이 실패하면 조용히 "demo-<시각>" 같은 가짜 주문번호를 만들어서
       // 결제 화면을 그대로 진행시켰어요. 그러면 손님은 실제로 존재하지 않는
@@ -117,9 +135,8 @@ export default function OrderCheckoutPage() {
       // 기준으로 저장해둬요. 이후 주문내역(손님/사장님)에서 서버 값이 비어있으면
       // 이 캐시로 채워요.
       setOrderHint(id, { amount: snapshotAmount, items: snapshotItems });
-      setOrderId(id);
-      setCreating(false);
-    });
+    setOrderId(id);
+    setCreating(false);
   };
 
   useEffect(() => {
@@ -129,7 +146,7 @@ export default function OrderCheckoutPage() {
     }
     if (hasCreatedRef.current) return;
     hasCreatedRef.current = true;
-    createOrder();
+    void createOrder();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

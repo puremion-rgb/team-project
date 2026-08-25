@@ -346,13 +346,45 @@ export type ApiStore = {
   business_info?: ApiStoreBusinessInfo | null;
 };
 
-/** POST /api/auth/customer/login — 손님 전용 로그인.
- * 백엔드가 CUSTOMER 권한 계정만 통과시켜요(사장님 계정으로 시도하면 403). */
-export async function apiCustomerLogin(email: string, password: string) {
-  return apiFetch<{ token: string; token_type: string; user: ApiUser }>(
+export type ApiAuthResponse = {
+  token: string;
+  token_type: string;
+  user: ApiUser;
+  store_id?: number;
+  store?: ApiStore;
+  stores?: ApiStore[];
+};
+
+/**
+ * 백엔드 배포 버전에 따라 로그인 성공 응답이 최상위에 오거나
+ * { data: { token, user } }처럼 한 번 감싸져 올 수 있어요. 토큰을 찾지 못한
+ * 상태를 "로그인 성공"으로 처리하면 주문 API가 Bearer 헤더 없이 호출되어 401이
+ * 나므로, 저장 전에 응답을 정규화하고 토큰 누락은 즉시 실패로 처리해요.
+ */
+function normalizeAuthResponse(raw: Record<string, unknown>): ApiAuthResponse {
+  const data = (raw.data ?? raw.result ?? raw) as Record<string, unknown>;
+  const token = pick<string>(data, ["token", "access_token", "accessToken"]);
+  const user = (data.user ?? raw.user) as ApiUser | undefined;
+  if (!token || !user || typeof user !== "object") {
+    throw new ApiError("로그인 응답에서 인증 토큰 또는 사용자 정보를 찾지 못했어요.", 0);
+  }
+  return {
+    token: String(token),
+    token_type: String(pick<string>(data, ["token_type", "tokenType"]) ?? "Bearer"),
+    user,
+    store_id: typeof data.store_id === "number" ? data.store_id : undefined,
+    store: data.store as ApiStore | undefined,
+    stores: data.stores as ApiStore[] | undefined,
+  };
+}
+
+/** POST /api/auth/customer/login — 손님 전용 로그인. */
+export async function apiCustomerLogin(email: string, password: string): Promise<ApiAuthResponse> {
+  const raw = await apiFetch<Record<string, unknown>>(
     "/api/auth/customer/login",
     { method: "POST", body: { email, password } },
   );
+  return normalizeAuthResponse(raw);
 }
 
 /** POST /api/auth/owner/login — 사장님 전용 로그인.
@@ -494,15 +526,30 @@ export async function apiLogout(authAs: AuthAs) {
   }
 }
 
-/** GET /api/users/me */
+/**
+ * GET /api/users/me (최신) / GET /api/me (Swagger 구버전 호환).
+ * 인증 확인은 결제 전에 반드시 수행해 만료/누락 토큰으로 주문을 생성하지 않아요.
+ */
 export async function apiGetMe(authAs: AuthAs): Promise<ApiUser | null> {
   if (!isApiConfigured()) return null;
-  try {
-    const res = await apiFetch<{ user: ApiUser }>("/api/users/me", { authAs });
-    return res.user;
-  } catch {
-    return null;
+  for (const path of ["/api/users/me", "/api/me"]) {
+    try {
+      const res = await apiFetch<Record<string, unknown>>(path, { authAs });
+      const candidate = (res.user ?? res.data ?? res) as ApiUser;
+      if (candidate && typeof candidate === "object" && typeof candidate.id === "number") {
+        return candidate;
+      }
+    } catch {
+      // 최신 엔드포인트가 없는 구버전 서버에서는 /api/me을 한 번 더 시도해요.
+    }
   }
+  return null;
+}
+
+/** 주문·결제 직전에 고객 토큰의 존재와 서버 인증을 확인해요. */
+export async function apiValidateCustomerSession(): Promise<"valid" | "missing" | "invalid"> {
+  if (!getCustomerToken()) return "missing";
+  return (await apiGetMe("customer")) ? "valid" : "invalid";
 }
 
 /** PUT /api/users/me — 손님 프로필 수정(이름/연락처/프로필사진/생년월일 등).
@@ -1252,16 +1299,17 @@ export async function apiCreateOrder(input: {
     });
     // eslint-disable-next-line no-console
     console.debug("[주문 생성] 서버 응답 원본:", res);
-    const raw = (res?.["order"] as Record<string, unknown> | undefined) ?? res;
-    const id = raw?.["id"];
-    if (typeof id !== "number") {
+    const envelope = (res?.["data"] as Record<string, unknown> | undefined) ?? res;
+    const raw = (envelope?.["order"] as Record<string, unknown> | undefined) ?? envelope;
+    const parsedId = Number(raw?.["id"] ?? raw?.["order_id"]);
+    if (!Number.isFinite(parsedId)) {
       lastCreateOrderError =
         "주문 생성은 됐지만 응답에서 주문 id를 찾지 못했어요. 브라우저 콘솔의 " +
         "'[주문 생성] 서버 응답 원본'을 확인해서 실제 필드명을 알려주시면 매칭시켜 드릴게요.";
       return null;
     }
     return {
-      id,
+      id: parsedId,
       store_id: Number(raw["store_id"] ?? input.store_id),
       status: raw["status"] as string | undefined,
       total_amount:
