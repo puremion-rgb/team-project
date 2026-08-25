@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { Loader2 } from "lucide-react";
 import Header from "@/components/Header";
+import LoadingIndicator from "@/components/LoadingIndicator";
 import { useOrders } from "@/lib/orders-store";
 import type { OrderStatus } from "@/lib/orders-store";
 
@@ -31,8 +31,7 @@ export default function ReservePage() {
       <div className="flex flex-col px-6 py-6">
         {loading ? (
           <div className="mt-16 flex flex-col items-center gap-3 text-ink-muted">
-            <Loader2 size={22} className="animate-spin" />
-            <p className="text-[14px]">주문 내역을 불러오는 중이에요…</p>
+            <LoadingIndicator label="주문 내역을 불러오는 중이에요…" />
           </div>
         ) : orders.length === 0 ? (
           <div className="mt-10 flex flex-col items-center">

@@ -10,7 +10,13 @@ const items = [
   { href: "/my", label: "MY", icon: User },
 ];
 
-const center = { href: "/map", label: "지도", icon: MapPin };
+const center = {
+  href: "/map",
+  label: "지도",
+  icon: MapPin,
+  iconSrc: "/animations/map-navigation-static.svg",
+  pressedAnimationSrc: "/animations/area-search-animated.svg",
+};
 
 export default function BottomNav() {
   return <ElevatedBottomNav items={items} center={center} color="brand" />;

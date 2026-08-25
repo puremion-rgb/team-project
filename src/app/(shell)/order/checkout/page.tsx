@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
 import Header from "@/components/Header";
+import LoadingIndicator from "@/components/LoadingIndicator";
 import Button from "@/components/Button";
 import { useCart } from "@/lib/cart-store";
 import {
@@ -233,8 +233,7 @@ export default function OrderCheckoutPage() {
       <div className="flex flex-1 flex-col px-6 pt-4">
         {creating ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 text-ink-muted">
-            <Loader2 size={22} className="animate-spin" />
-            <p className="text-[14px]">주문을 생성하는 중이에요…</p>
+            <LoadingIndicator label="주문을 생성하는 중이에요…" />
           </div>
         ) : createError ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 px-4 text-center">

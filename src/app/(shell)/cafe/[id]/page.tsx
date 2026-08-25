@@ -7,7 +7,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Heart,
   Navigation,
   Share2,
   Star,
@@ -16,6 +15,7 @@ import {
 import ImagePlaceholder from "@/components/ImagePlaceholder";
 import StatusBadge from "@/components/StatusBadge";
 import AmenityIcon from "@/components/AmenityIcon";
+import FavoriteButton from "@/components/FavoriteButton";
 import StarRating from "@/components/StarRating";
 import { useReviews } from "@/lib/reviews-store";
 import { useWishlist } from "@/lib/wishlist-store";
@@ -331,17 +331,12 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
         </button>
 
         <div className="absolute right-4 top-4 flex items-center gap-2">
-          <button
-            aria-label="찜하기"
-            onClick={() => toggleLike(cafe.id)}
-            className="flex h-9 w-9 items-center justify-center rounded-full bg-white/90"
-          >
-            <Heart
-              size={18}
-              className={liked ? "fill-brand text-brand" : "text-ink"}
-              strokeWidth={1.8}
-            />
-          </button>
+          <FavoriteButton
+            liked={liked}
+            onToggle={() => toggleLike(cafe.id)}
+            iconSize={18}
+            className="h-9 w-9 rounded-full bg-white/90"
+          />
           {/* ⚠️ 예전엔 여기가 점 세개(더보기) 버튼이었고, 눌러야 나오는 메뉴
               안에 "공유하기" 하나만 들어있었어요. 항목이 하나뿐이라 한 번 더
               누르게 만들 이유가 없어서, 바로 공유하기 아이콘 버튼으로 바꿨어요. */}

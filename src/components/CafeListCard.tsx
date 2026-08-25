@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { Heart, Star } from "lucide-react";
+import { Star } from "lucide-react";
 import type { Cafe } from "@/lib/data";
 import ImagePlaceholder from "./ImagePlaceholder";
 import StatusBadge from "./StatusBadge";
+import FavoriteButton from "./FavoriteButton";
 
 export default function CafeListCard({
   cafe,
@@ -52,20 +53,15 @@ export default function CafeListCard({
               길찾기 ›
             </Link>
           ) : (
-            <button
-              aria-label="찜하기"
-              onClick={(e) => {
-                e.preventDefault();
-                onToggleLike?.(cafe.id);
-              }}
-              className="shrink-0 text-ink"
+            <span
+              className="shrink-0"
+              onClick={(event) => event.preventDefault()}
             >
-              <Heart
-                size={20}
-                className={cafe.liked ? "fill-brand text-brand" : "text-ink"}
-                strokeWidth={1.8}
+              <FavoriteButton
+                liked={cafe.liked}
+                onToggle={() => onToggleLike?.(cafe.id)}
               />
-            </button>
+            </span>
           )}
         </div>
         <p className="flex items-center gap-1 text-[13px] text-ink-secondary">

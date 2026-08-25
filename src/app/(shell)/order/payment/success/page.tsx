@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2 } from "lucide-react";
 import Header from "@/components/Header";
+import LoadingIndicator from "@/components/LoadingIndicator";
 import { useCart } from "@/lib/cart-store";
 import { useOrders } from "@/lib/orders-store";
 import { apiConfirmPayment, isApiConfigured, getPendingTossPayment, clearPendingTossPayment } from "@/lib/api";
@@ -125,8 +125,7 @@ export default function OrderPaymentSuccessPage() {
       <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-ink-muted">
         {status === "confirming" ? (
           <>
-            <Loader2 size={22} className="animate-spin" />
-            <p className="text-[14px]">결제를 확인하는 중이에요…</p>
+            <LoadingIndicator label="결제를 확인하는 중이에요…" />
           </>
         ) : (
           <>

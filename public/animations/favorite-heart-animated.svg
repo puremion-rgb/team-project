@@ -1,0 +1,88 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+<style>
+@keyframes kf_Vector_9_transform_0 {
+  0% {
+    animation-timing-function: cubic-bezier(0.3, -0.05, 0.7, -0.5);
+    transform: translateX(111px) translateY(26px) translate(-46.5px, 39.5px) scaleX(0.5) scaleY(0.5) translate(46.5px, -39.5px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  47.69% {
+    transform: translateX(111px) translateY(26px) translate(-46.5px, 39.5px) scaleX(1) scaleY(1) translate(46.5px, -39.5px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  100% {
+    transform: translateX(111px) translateY(26px) translate(-46.5px, 39.5px) scaleX(1) scaleY(1) translate(46.5px, -39.5px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+}
+#Vector_9 {
+  transform-origin: 0 0;
+  animation: kf_Vector_9_transform_0 2.948556s linear infinite;
+}
+@keyframes kf_Vector_7_transform_0 {
+  0% {
+    transform: translateX(65px) translateY(75px) translate(-18px, 15px) scaleX(0) scaleY(0) translate(18px, -15px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  76.66% {
+    animation-timing-function: ease-out;
+    transform: translateX(65px) translateY(75px) translate(-18px, 15px) scaleX(0) scaleY(0) translate(18px, -15px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  96.81% {
+    transform: translateX(65px) translateY(75px) translate(-18px, 15px) scaleX(1) scaleY(1) translate(18px, -15px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  100% {
+    transform: translateX(65px) translateY(75px) translate(-18px, 15px) scaleX(1) scaleY(1) translate(18px, -15px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+}
+#Vector_7 {
+  transform-origin: 0 0;
+  animation: kf_Vector_7_transform_0 2.948556s linear infinite;
+}
+@keyframes kf_Vector_8_transform_0 {
+  0% {
+    transform: translateX(123px) translateY(38px) translateX(0px) translateY(0px) translate(-19px, 16px) scaleX(0) scaleY(0) translate(19px, -16px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  56.14% {
+    animation-timing-function: cubic-bezier(0.45, 1.45, 0.8, 1);
+    transform: translateX(123px) translateY(38px) translateX(0px) translateY(0px) translate(-19px, 16px) scaleX(0) scaleY(0) translate(19px, -16px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  85.91% {
+    transform: translateX(123px) translateY(38px) translateX(0px) translateY(0px) translate(-19px, 16px) scaleX(1) scaleY(1) translate(19px, -16px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  100% {
+    transform: translateX(123px) translateY(38px) translateX(0px) translateY(0px) translate(-19px, 16px) scaleX(1) scaleY(1) translate(19px, -16px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+}
+#Vector_8 {
+  transform-origin: 0 0;
+  animation: kf_Vector_8_transform_0 2.948556s linear infinite;
+}
+@keyframes kf_Vector_6_transform_0 {
+  0% {
+    transform: translateX(84px) translateY(35px) translateX(0px) translateY(0px) translate(-29px, 24px) scaleX(0) scaleY(0) translate(29px, -24px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  24.83% {
+    animation-timing-function: ease-in;
+    transform: translateX(84px) translateY(35px) translateX(0px) translateY(0px) translate(-29px, 24px) scaleX(0) scaleY(0) translate(29px, -24px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  62.52% {
+    transform: translateX(84px) translateY(35px) translateX(-20px) translateY(-20px) translate(-29px, 24px) scaleX(1) scaleY(1) translate(29px, -24px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+  100% {
+    transform: translateX(84px) translateY(35px) translateX(-20px) translateY(-20px) translate(-29px, 24px) scaleX(1) scaleY(1) translate(29px, -24px) rotate(3.142rad) scaleY(-1) skewX(0rad);
+  }
+}
+#Vector_6 {
+  transform-origin: 0 0;
+  animation: kf_Vector_6_transform_0 2.948556s linear infinite;
+}
+</style>
+<g id="heart-ani" clip-path="url(#clip0_57_69)">
+<path id="Vector_9" transform="matrix(-1 0 0 1 111 26)" d="M4.58658 9.28429C-7.40791 26.4494 3.31238 49.5564 46.3669 79H46.6331C89.6876 49.5564 100.408 26.4494 88.4134 9.28429C76.4189 -7.88086 52.7375 0.701732 46.6331 19.1872H46.3669C40.2625 0.701732 16.5811 -7.88086 4.58658 9.28429Z" stroke="#242323" stroke-width="7" stroke-linejoin="round"/>
+<path id="Vector_7" transform="matrix(-1 0 0 1 65 75)" d="M1.77545 3.52568C-2.86758 10.0441 1.28221 18.8189 17.9485 30H18.0515C34.7178 18.8189 38.8676 10.0441 34.2245 3.52568C29.5815 -2.99273 20.4145 0.266481 18.0515 7.28629H17.9485C15.5855 0.266481 6.41848 -2.99273 1.77545 3.52568Z" fill="#FFB388"/>
+<path id="Vector_8" transform="matrix(-1 0 0 1 123 38)" d="M1.87409 3.76072C-3.02689 10.7137 1.35345 20.0735 18.9456 32H19.0544C36.6466 20.0735 41.0269 10.7137 36.1259 3.76072C31.2249 -3.19225 21.5487 0.284246 19.0544 7.77205H18.9456C16.4513 0.284246 6.77506 -3.19225 1.87409 3.76072Z" fill="#91FB8B"/>
+<path id="Vector_6" transform="matrix(-1 0 0 1 84 35)" d="M2.86045 5.64109C-4.61998 16.0705 2.06579 30.1102 28.917 48H29.083C55.9342 30.1102 62.62 16.0705 55.1395 5.64109C47.6591 -4.78837 32.8901 0.426369 29.083 11.6581H28.917C25.1099 0.426369 10.3409 -4.78837 2.86045 5.64109Z" fill="#88EFFF"/>
+</g>
+<defs>
+<clipPath id="clip0_57_69">
+<rect width="128" height="128" fill="white"/>
+</clipPath>
+</defs>
+</svg>

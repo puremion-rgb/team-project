@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
 
@@ -9,6 +10,10 @@ export type NavItem = {
   label: string;
   icon: LucideIcon;
   exact?: boolean;
+  /** Static image for a custom center icon (e.g. the map marker animation's still frame). */
+  iconSrc?: string;
+  /** Animated image shown only after this navigation item is pressed. */
+  pressedAnimationSrc?: string;
 };
 
 const colorMap = {
@@ -36,6 +41,20 @@ export default function ElevatedBottomNav({
   const right = items.slice(2, 4);
   const centerActive = isActive(center.href, center.exact);
   const CenterIcon = center.icon;
+  const [showCenterAnimation, setShowCenterAnimation] = useState(false);
+  const centerAnimationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (centerAnimationTimer.current) clearTimeout(centerAnimationTimer.current);
+  }, []);
+
+  const playCenterAnimation = () => {
+    if (!center.pressedAnimationSrc) return;
+    setShowCenterAnimation(false);
+    window.requestAnimationFrame(() => setShowCenterAnimation(true));
+    if (centerAnimationTimer.current) clearTimeout(centerAnimationTimer.current);
+    centerAnimationTimer.current = setTimeout(() => setShowCenterAnimation(false), 1900);
+  };
 
   const renderItem = (item: NavItem) => {
     const active = isActive(item.href, item.exact);
@@ -68,15 +87,38 @@ export default function ElevatedBottomNav({
         {left.map(renderItem)}
 
         <li className="flex-1">
-          <Link href={center.href} className="flex flex-col items-center gap-1 py-1">
+          <Link
+            href={center.href}
+            onClick={playCenterAnimation}
+            className="flex flex-col items-center gap-1 py-1"
+          >
             <span className="relative flex h-6 items-center justify-center">
               <span
                 className={
-                  "absolute -top-7 flex h-14 w-14 items-center justify-center rounded-full border-4 border-white shadow-sheet transition-colors " +
-                  (centerActive ? c.bgActive : c.bgInactive)
+                  center.iconSrc
+                    ? "absolute -top-7 h-14 w-14 overflow-visible"
+                    : "absolute -top-7 flex h-14 w-14 items-center justify-center rounded-full border-4 border-white shadow-sheet transition-colors " +
+                      (centerActive ? c.bgActive : c.bgInactive)
                 }
               >
-                <CenterIcon size={24} strokeWidth={2.2} className="text-white" />
+                {center.iconSrc ? (
+                  <img
+                    src={center.iconSrc}
+                    alt=""
+                    aria-hidden="true"
+                    className="h-14 w-14"
+                  />
+                ) : (
+                  <CenterIcon size={24} strokeWidth={2.2} className="text-white" />
+                )}
+                {showCenterAnimation && center.pressedAnimationSrc && (
+                  <img
+                    src={center.pressedAnimationSrc}
+                    alt=""
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 h-14 w-14"
+                  />
+                )}
               </span>
             </span>
             <span
