@@ -104,9 +104,11 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
     // 있지만, 하트를 누르는 순간은 로그인이 필요해요). 예전엔 여기서 로그인
     // 여부를 확인하지 않아서, 비로그인 상태에서 눌러도 화면에서는 하트가
     // 낙관적으로 채워졌다가(실제 서버 저장은 401로 실패) 다음 새로고침에만
-    // 조용히 사라졌어요. 이제 비로그인이면 바로 로그인 화면으로 안내해요.
+    // 조용히 사라졌어요. 이제 비로그인이면 앱 공통 로그인 안내 화면(/reserve)으로
+    // 안내해요. 카페 상세에서만 곧바로 로그인 폼으로 이동하면 다른 보호 기능과
+    // 경험이 달라지고, 회원가입 선택지도 놓치기 쉬워요.
     if (!isLoggedIn) {
-      router.push("/login");
+      router.push("/reserve");
       return;
     }
     const willLike = !likedIds.has(cafeId);
