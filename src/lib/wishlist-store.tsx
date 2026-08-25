@@ -24,6 +24,11 @@ type WishlistContextValue = {
   cafes: Cafe[];
   isLiked: (cafeId: string) => boolean;
   toggleLike: (cafeId: string) => void;
+  /** 로그인은 돼 있는데(isLoggedIn=true) 서버에서 찜 목록을 못 받아왔을 때 true.
+   * "같은 계정인데 이 기기/주소에서는 찜한 카페가 안 보인다"는 문제를 조사할 때,
+   * 화면에서 "0개라서 진짜 안 보이는 건지" "애초에 못 불러온 건지"를 구분할 수
+   * 있게 해요. */
+  favoritesLoadFailed: boolean;
 };
 
 const WishlistContext = createContext<WishlistContextValue | null>(null);
@@ -53,6 +58,7 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
   const [likedIds, setLikedIds] = useState<Set<string>>(
     () => new Set(storeCafes.filter((c) => c.liked).map((c) => c.id))
   );
+  const [favoritesLoadFailed, setFavoritesLoadFailed] = useState(false);
 
   // ⚠️ 예전엔 이 useEffect가 컴포넌트가 처음 마운트될 때 딱 한 번만
   // 실행됐어요(deps: []). 그래서 로그인 상태로 찜 목록을 불러온 뒤 로그아웃해도
@@ -65,12 +71,27 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isLoggedIn) {
       setLikedIds(new Set());
+      setFavoritesLoadFailed(false);
       return;
     }
     if (!isApiConfigured()) return;
     let cancelled = false;
+    // ⚠️ "localhost에서는 찜한 카페가 뜨는데 다른 주소(예: 192.168.x.x)로
+    // 들어가면 안 보인다"는 문제 조사용: 로그인 토큰은 브라우저 localStorage에
+    // 저장되는데, 이건 주소(origin)마다 완전히 분리된 저장소예요. 즉
+    // localhost:3000과 192.168.x.x:3000은 브라우저 입장에서는 "다른 사이트"라서,
+    // 같은 계정으로 로그인했더라도 이 기기·이 주소에서 실제로 로그인 토큰이
+    // 정상 저장돼 있는지부터 다시 확인이 필요해요. 예전엔 ids가 null이면(=요청
+    // 실패, 대부분 401/토큰 문제) 조용히 무시하고 넘어가서 "찜한 카페가 없어요"
+    // 빈 화면과 "불러오길 실패했어요"를 구분할 수 없었어요. 이제 실패를 따로
+    // 기록해서 화면(찜 목록 페이지)이 서로 다른 안내를 보여줄 수 있게 해요.
     apiGetMyFavoriteStoreIds().then((ids) => {
-      if (cancelled || !ids) return;
+      if (cancelled) return;
+      if (!ids) {
+        setFavoritesLoadFailed(true);
+        return;
+      }
+      setFavoritesLoadFailed(false);
       setLikedIds(new Set(ids));
     });
     return () => {
@@ -121,8 +142,9 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
       cafes,
       isLiked: (cafeId: string) => likedIds.has(cafeId),
       toggleLike,
+      favoritesLoadFailed,
     };
-  }, [storeCafes, likedIds]);
+  }, [storeCafes, likedIds, favoritesLoadFailed]);
 
   return (
     <WishlistContext.Provider value={value}>

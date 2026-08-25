@@ -26,6 +26,9 @@ import {
   apiOwnerCreateSeat,
   apiOwnerDeleteSeat,
   apiOwnerUpdateSeat,
+  apiOwnerBulkUpdateSeats,
+  lastSeatError,
+  lastSeatErrorAmbiguous,
   apiGetStore,
   apiGetStoreReviews,
   apiOwnerUpdateBusinessStatus,
@@ -40,6 +43,7 @@ import {
   extractReplyContent,
   extractReplyId,
   extractReviewImageUrls,
+  reviewerDisplayName,
 } from "@/lib/api";
 import { useOwnerAuth } from "@/lib/owner-auth-store";
 import { geocodeAddress } from "@/lib/kakao-map-sdk";
@@ -236,6 +240,60 @@ function makeUniqueSuffix(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** 여러 개(추가/삭제 등)를 처리할 때, 완전히 순서대로(하나 끝나야 다음
+ * 시작) 처리하면 안전하지만 좌석이 많을 때(예: 16개) 화면이 하나씩 아주
+ * 천천히 늘어나거나 줄어드는 것처럼 보여서 너무 느렸어요. 반대로 전부
+ * 한꺼번에(Promise.all) 보내면 응답이 뒤섞여 도착하면서 화면이 잠깐
+ * 들쭉날쭉해 보일 수 있어요. 그래서 한 번에 최대 `limit`개까지만 동시에
+ * 진행하고, 하나가 끝나는 대로 다음 걸 이어서 시작하는 방식으로 절충해요
+ * — 체감 속도는 훨씬 빠르면서도 한꺼번에 너무 많은 요청이 몰리지 않아요. */
+async function runWithConcurrencyLimit<T>(
+  tasks: Array<() => Promise<T>>,
+  limit: number,
+): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let nextIndex = 0;
+  async function worker() {
+    for (;;) {
+      const i = nextIndex++;
+      if (i >= tasks.length) return;
+      results[i] = await tasks[i]();
+    }
+  }
+  const workerCount = Math.max(1, Math.min(limit, tasks.length));
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+/** 좌석 추가/삭제처럼 서버로 여러 요청을 나눠 보낼 때 한 번에 진행할
+ * 최대 개수예요. 너무 크면(예: 전부 동시에) 응답 순서가 뒤섞이기 쉽고,
+ * 너무 작으면(1이면 완전 순서대로) 느려요. 4 정도가 체감 속도와 안정성의
+ * 균형이 잘 맞아요. */
+const SEAT_BATCH_CONCURRENCY = 4;
+
+/** 좌석 라벨(문자열)을 숫자로 정렬해요. 마이그레이션 이전 매장에 "A1"처럼
+ * 숫자가 아닌 라벨이 남아있어도 에러 없이 뒤로 보내요. store/page.tsx의
+ * 화면 표시 정렬과 applySeatsTotal의 번호 계산이 항상 같은 기준을 쓰도록
+ * 여기 한 곳에만 둬요. */
+export function sortSeatsByNumber(seats: OwnerSeat[]): OwnerSeat[] {
+  return [...seats].sort((a, b) => {
+    const na = Number(a.label);
+    const nb = Number(b.label);
+    if (Number.isNaN(na) && Number.isNaN(nb)) return a.label.localeCompare(b.label);
+    if (Number.isNaN(na)) return 1;
+    if (Number.isNaN(nb)) return -1;
+    return na - nb;
+  });
+}
+
+/** 좌석 번호가 항상 "1, 2, 3 ... N"으로 딱 맞게 매겨져 있는지 확인해요(번호
+ * 없는/숫자가 아닌 라벨이 섞여 있거나, 예전 테스트 데이터가 남아 중간
+ * 숫자부터 시작하거나, 군데군데 번호가 비어있으면 false). applySeatsTotal이
+ * 이 값을 보고 "그냥 이어붙이기"와 "번호 전체 재정렬" 중 뭘 할지 정해요. */
+function isSeatsCompact(sortedSeats: OwnerSeat[]): boolean {
+  return sortedSeats.every((s, i) => Number(s.label) === i + 1);
+}
+
 function mapApiSeatToOwnerSeat(seat: ApiSeat): OwnerSeat {
   return {
     id: String(seat.id),
@@ -330,7 +388,10 @@ function mapApiStoreToProfile(store: ApiStore, prev: StoreProfile): StoreProfile
 function mapApiReviewToOwnerReview(review: ApiReview): OwnerReview {
   return {
     id: String(review.id),
-    customerName: review.customer_name ?? "고객",
+    // ⚠️ "그냥 고객이라고만 나온다"는 문제 대응: customer_name을 못 찾은
+    // 응답이어도 review.user_id로 "손님 #123"처럼 최소한 서로 다른 손님인지는
+    // 구분되게 해요(reviewerDisplayName이 여러 후보 필드명도 먼저 시도해요).
+    customerName: reviewerDisplayName(review),
     rating: review.rating,
     content: review.content,
     date: review.created_at?.slice(0, 10).replace(/-/g, ".") ?? "",
@@ -404,8 +465,19 @@ type OwnerContextValue = {
 
   seats: OwnerSeat[];
   setSeatStatus: (id: string, status: SeatState) => void;
-  addSeat: (label: string) => void;
-  removeSeat: (id: string) => void;
+  /** 서버 저장까지 끝나면 완료되는 Promise를 돌려줘요 — 여러 좌석을 연달아
+   * 추가할 때(총 좌석 수 조정) 이전 저장이 끝난 뒤 다음 좌석을 요청하도록
+   * 순서를 맞추는 데 써요. */
+  addSeat: (label: string) => Promise<string | null>;
+  /** addSeat과 동일한 이유로 Promise를 돌려줘요. */
+  removeSeat: (id: string) => Promise<void>;
+  /** 총 좌석 수 조정(여러 좌석 추가/삭제)이 순서대로 처리되는 중인지예요.
+   * true인 동안엔 "전체 좌석 수" 입력을 잠깐 막아서, 아직 처리 중인 이전
+   * 변경과 겹쳐 좌석 번호가 꼬이는 일을 막아요. */
+  seatsBatchBusy: boolean;
+  /** "전체 좌석 수"를 원하는 값으로 한 번에 맞춰요. 내부에서 add/removeSeat을
+   * 순서대로(직렬로) 호출해서, 연달아 여러 번 조정해도 번호가 꼬이지 않아요. */
+  applySeatsTotal: (newTotal: number) => Promise<void>;
   /** 좌석 전체 삭제(중복 정리용). 서버에 실제로 지워진 좌석만 화면에서
    * 지워요 — 자세한 이유는 아래 resetAllSeats 구현부 주석 참고. */
   resetAllSeats: () => void;
@@ -441,9 +513,15 @@ type OwnerContextValue = {
   /** 손님이 픽업을 완료해서 주문을 마무리해요. */
   completeOrder: (id: string) => void;
   /** 이미 접수된 주문을 취소해요. */
-  cancelOrder: (id: string) => void;
+  cancelOrder: (id: string) => Promise<{ ok: boolean; message?: string }>;
 
   menu: OwnerMenuItem[];
+  /** 메뉴 목록을 서버에서 불러오는 중인지 / 마지막 시도가 실패했는지예요.
+   * 실패해도 화면의 메뉴 목록 자체는 그대로 유지하고, 8초마다·탭 복귀
+   * 시마다 자동으로 다시 시도해요. retryMenusLoad로 수동 재시도도 가능해요. */
+  menusLoading: boolean;
+  menusLoadFailed: boolean;
+  retryMenusLoad: () => void;
   /** 메뉴를 추가해요. 서버 저장에 실패하면(예: 이 매장에 해당 카테고리가 아직
    * 없어서) 화면에 붙였던 항목을 다시 지우고 실패를 알려줘요 — 저장 안 된
    * 메뉴가 화면에만 남아있다가 재로그인 시 사라지는 것처럼 보이지 않게 해요. */
@@ -502,6 +580,18 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   const [seatsResetting, setSeatsResetting] = useState(false);
   const [seatsLoadFailed, setSeatsLoadFailed] = useState(false);
   const [seatsRefreshKey, setSeatsRefreshKey] = useState(0);
+  // ⚠️ "총 좌석 수"를 늘리거나 줄일 때 여러 좌석을 추가/삭제 API로 한 번에
+  // 여러 건 보내야 해서, 예전엔 각 요청 사이에 120ms만 살짝 두고 전부
+  // 예약(setTimeout)해둔 뒤 곧바로 다음 입력을 받을 수 있었어요. 문제는
+  // 그 사이(특히 좌석이 10개 이상이면 1초 넘게 걸려요)에 사장님이 "전체
+  // 좌석 수"를 또 한 번 바꾸면, 그 두 번째 변경은 아직 화면에 반영도 안 된
+  // (=아직 서버 응답을 기다리는 중인) 좌석 개수를 기준으로 다시 계산돼서
+  // 번호가 겹치거나 뒤섞인 좌석이 함께 만들어졌어요 — "숫자가 뒤죽박죽
+  // 섞인다"는 문제의 진짜 원인이었어요. 이제 좌석 추가/삭제를 순서대로
+  // 하나씩 기다렸다가 처리하고, 처리하는 동안에는 이 값을 true로 둬서
+  // "전체 좌석 수" 입력을 잠깐 막아요(이전 변경이 다 끝난 뒤에만 다음
+  // 변경을 받아요).
+  const [seatsBatchBusy, setSeatsBatchBusy] = useState(false);
   // 서버에서 불러온 실제 혼잡도(손님 화면과 동일한 값). 아직 못 불러왔으면
   // null이고, 그동안은 좌석 수로 추정한 값을 화면에 보여줘요.
   const [serverCongestion, setServerCongestion] = useState<CongestionLevel | null>(null);
@@ -512,6 +602,18 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   // 번호를 매겨서, 최신 요청의 응답만 반영하고 낡은 응답은 버려요.
   const ordersRequestIdRef = useRef(0);
   const [menu, setMenu] = useState<OwnerMenuItem[]>(initialMenu);
+  // ⚠️ 예전엔 메뉴 목록을 로그인 시점에 딱 한 번만 불러오고, 그 요청이
+  // 실패하면(일시적 네트워크 오류 등) 재시도 없이 그냥 빈 배열로 영원히
+  // 남아있었어요 — 좌석/주문/혼잡도는 전부 주기적으로 다시 불러오거나
+  // "불러오기 실패" 상태와 재시도 버튼이 있는데 메뉴만 없었어요. 그래서
+  // "어제까진 잘 보이던 메뉴가 오늘은 안 보인다"처럼 한 번의 실패가
+  // 세션 내내 이어지는 문제로 이어졌어요(공개 카페 상세 화면은 열 때마다
+  // 다시 불러오는 별도 API라서 거긴 멀쩡했던 것도 그래서예요). 이제 좌석과
+  // 같은 패턴으로 "불러오는 중 / 실패 / 재시도"를 구분해요.
+  const [menusLoading, setMenusLoading] = useState(false);
+  const [menusLoadFailed, setMenusLoadFailed] = useState(false);
+  const [menusRefreshKey, setMenusRefreshKey] = useState(0);
+  const retryMenusLoad = () => setMenusRefreshKey((k) => k + 1);
   const [reviews, setReviews] = useState<OwnerReview[]>(initialReviews);
   const [settings, setSettingsState] = useState<SettingsState>(initialSettings);
   const [inquiries, setInquiries] = useState<OwnerInquiry[]>(initialInquiries);
@@ -524,6 +626,13 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   const [salesLoading, setSalesLoading] = useState(false);
   const [salesError, setSalesError] = useState<string | null>(null);
   const [salesRefreshKey, setSalesRefreshKey] = useState(0);
+  // ⚠️ "오늘 매출 숫자가 계속 깜빡거려요" 문제의 원인: 아래 8초 폴링이 돌 때마다
+  // salesLoading을 true로 켰다가 꺼서, 값이 안 바뀌어도 숫자 opacity가
+  // 100%→50%→100%로 매번 페이드됐어요. 화면(페이지.tsx)의 페이드 효과는 "맨
+  // 처음 불러오는 중"에만 보여주면 충분하니, 이 ref로 "최초 로딩을 이미
+  // 끝냈는지"를 기억해서 그 이후의 백그라운드 폴링에서는 salesLoading을 켜지
+  // 않고 조용히 값만 갱신해요.
+  const hasLoadedSalesOnceRef = useRef(false);
 
   // 실제 storeId가 생기면(로그인/가입 완료) 오늘 매출 데이터를 서버에서 가져와요.
   // NEXT_PUBLIC_API_BASE_URL이 아직 없거나 storeId를 모르면 fetchTodaySales가
@@ -538,7 +647,10 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
     if (!ownerStoreId) return;
     let cancelled = false;
     const load = () => {
-      setSalesLoading(true);
+      // 최초 로딩일 때만 페이드(salesLoading) 표시. 그 이후 8초 폴링/포커스
+      // 복귀 갱신은 값이 실제로 바뀔 때만 화면이 바뀌게(불필요한 깜빡임 없이).
+      const isFirstLoad = !hasLoadedSalesOnceRef.current;
+      if (isFirstLoad) setSalesLoading(true);
       setSalesError(null);
       fetchTodaySales(ownerStoreId)
         .then((result) => {
@@ -554,7 +666,9 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
           setSalesError("매출 데이터를 불러오지 못했어요.");
         })
         .finally(() => {
-          if (!cancelled) setSalesLoading(false);
+          if (cancelled) return;
+          hasLoadedSalesOnceRef.current = true;
+          if (isFirstLoad) setSalesLoading(false);
         });
     };
     load();
@@ -604,28 +718,54 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   // 자동 선택해요). 그래서 ownerStoreId 캐시 여부와 상관없이 로그인만 돼 있으면
   // 항상 불러올 수 있어요 — ownerStoreId를 기다리다 못 구하면(구버전 흔적 등)
   // 메뉴 목록 자체를 영영 못 불러오는 문제를 피할 수 있어요.
+  // ⚠️ 예전엔 이 요청이 딱 한 번만 나가고 실패해도 재시도가 없었어요(위
+  // menusLoading 선언부 주석 참고). 이제 주문/좌석과 같은 패턴으로 8초마다
+  // 다시 불러오고, 다른 탭을 보다 돌아오면(포커스/가시성 복귀) 즉시 한 번 더
+  // 불러와요 — 한 번의 실패가 세션 내내 "메뉴 없음"으로 굳어버리지 않아요.
+  // retryMenusLoad(=menusRefreshKey)로 수동 재시도도 가능해요.
   useEffect(() => {
     if (!isOwnerLoggedIn) return;
+    if (!isApiConfigured()) return; // 목데이터 모드 — "못 불러온 것"이 아니라 애초에 서버가 없는 상태예요.
     let cancelled = false;
-    apiOwnerListMenus().then((rows) => {
-      if (cancelled || !rows) return;
-      setMenu(
-        rows.map((m) => ({
-          id: String(m.id),
-          name: m.name,
-          price: Math.round(Number(m.price)),
-          category: m.category
-            ? normalizeMenuCategory(m.category)
-            : guessMenuCategory(m.name),
-          stock: null,
-          imageUrl: m.image_url ?? null,
-        }))
-      );
-    });
+    const load = (isFirst: boolean) => {
+      if (isFirst) setMenusLoading(true);
+      apiOwnerListMenus().then((rows) => {
+        if (cancelled) return;
+        if (isFirst) setMenusLoading(false);
+        if (!rows) {
+          setMenusLoadFailed(true);
+          return;
+        }
+        setMenusLoadFailed(false);
+        setMenu(
+          rows.map((m) => ({
+            id: String(m.id),
+            name: m.name,
+            price: Math.round(Number(m.price)),
+            category: m.category
+              ? normalizeMenuCategory(m.category)
+              : guessMenuCategory(m.name),
+            stock: null,
+            imageUrl: m.image_url ?? null,
+          }))
+        );
+      });
+    };
+    load(true);
+    const interval = setInterval(() => load(false), 8000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") load(false);
+    };
+    const onFocus = () => load(false);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onFocus);
     };
-  }, [isOwnerLoggedIn]);
+  }, [isOwnerLoggedIn, menusRefreshKey]);
 
   // 매장 주문 목록을 서버에서 불러와요.
   // ⚠️ 예약과 달리 이 경로(GET /api/owner/stores/{store}/orders)는 storeId를
@@ -879,6 +1019,16 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   // 실패하기만 해서, 여기서 미리 걸러서 화면-서버가 어긋나지 않게 해요.
   const isTempSeatId = (id: string) => id.startsWith("seat-");
 
+  // ⚠️ 방어용 안전장치예요. apiOwnerCreateSeat의 응답 파싱 버그(이제 고쳤어요
+  // — 위 addSeat 주석 참고)가 있었을 때는 새로 만든 좌석의 id가 문자열
+  // "undefined"로 저장돼서, 그 좌석을 눌러 상태를 바꾸면
+  // PATCH /api/owner/seats/undefined처럼 유효하지 않은 주소로 요청이 나가
+  // 404("No query results ... undefined")로 실패했어요. 원인은 고쳤지만,
+  // 혹시라도 서버 응답 형식이 다시 예상과 달라지는 경우에 대비해 여기서도
+  // "undefined"/빈 값처럼 명백히 잘못된 id로는 API를 아예 호출하지 않도록
+  // 한 번 더 막아둬요.
+  const isValidRealSeatId = (id: string) => id !== "" && id !== "undefined" && id !== "null";
+
   // 좌석 상태를 바꿀 때마다(총 좌석 수 스테퍼, 남은 좌석 수 숫자판 포함) 서버에도
   // 즉시 반영해요. 이 좌석 상태(AVAILABLE/UNAVAILABLE)가 카페 상세·지도의
   // "잔여 좌석" 계산(GET /api/stores/{store}/congestion)의 원본 데이터라서,
@@ -886,33 +1036,62 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   const setSeatStatus = (id: string, status: SeatState) => {
     const prevStatus = seats.find((s) => s.id === id)?.status;
     setSeats((prev) => prev.map((s) => (s.id === id ? { ...s, status } : s)));
-    if (!isOwnerLoggedIn || isTempSeatId(id) || !isApiConfigured()) return;
+    if (!isOwnerLoggedIn || isTempSeatId(id) || !isValidRealSeatId(id) || !isApiConfigured()) return;
     void apiOwnerUpdateSeat(id, seatStateToApiStatus(status)).then((ok) => {
       if (ok) {
         setSeatSyncError(null);
         return;
       }
-      // 저장 실패 — 화면이 실제로 저장된 상태와 다르게 보이지 않도록 원래
+      // ⚠️ (5번째 수정) 타임아웃(status===0)처럼 "서버가 실제로 처리했는지
+      // 알 수 없는" 애매한 실패일 때는 원래 상태로 되돌리지 않아요 — 되돌린
+      // 화면이 오히려 틀렸을 수 있어요(서버는 이미 저장했는데 화면만 예전
+      // 상태로 돌아가는 경우, 아래 api.ts의 lastSeatErrorAmbiguous 설명
+      // 참고). 대신 서버에서 좌석 목록을 다시 불러와 실제 상태로 맞춰요.
+      if (lastSeatErrorAmbiguous) {
+        setSeatSyncError(
+          (lastSeatError ?? "서버 응답을 확인하지 못했어요.") +
+            " 실제 저장 여부를 다시 확인할게요...",
+        );
+        retrySeatsLoad();
+        return;
+      }
+      // 서버가 명확히 거절한 경우(예: 422)에는 실제로 저장되지 않은 게
+      // 확실하니, 화면이 실제로 저장된 상태와 다르게 보이지 않도록 원래
       // 상태로 되돌리고, 왜 안 됐는지 안내해요("눌러도 반영이 안 되는 것
       // 같다"는 혼란의 원인이 바로 이 조용한 실패였어요).
       if (prevStatus) {
         setSeats((prev) => prev.map((s) => (s.id === id ? { ...s, status: prevStatus } : s)));
       }
+      // ⚠️ 예전엔 실패 사유(네트워크 단절 vs 서버가 요청을 거부함)를 구분하지
+      // 않고 항상 "기기 접속 확인" 문구만 보여줬어요. lastSeatError(api.ts)에
+      // 담긴 실제 사유가 있으면 그걸 우선 보여줘서, 진짜 원인(예: 422 검증
+      // 실패)을 헷갈리지 않게 해요.
       setSeatSyncError(
-        "좌석 상태 저장에 실패했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인해주세요.",
+        lastSeatError ??
+          "좌석 상태 저장에 실패했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인해주세요.",
       );
     });
   };
 
-  const addSeat = (label: string) => {
+  /** 좌석 하나를 추가해요. 화면엔 즉시(낙관적으로) 반영되고, 서버가 실제로
+   * 만들어준 좌석 id를 돌려줘요(실패하면 null). 여러 좌석을 한꺼번에 추가할
+   * 때(총 좌석 수 늘리기) applySeatsTotal이 이 id들을 모아서, 상태(사용중 등)
+   * 복원이 필요하면 좌석마다 따로따로가 아니라 한 번의 일괄 PATCH로 처리해요.
+   * ⚠️ 예전엔 이 함수가 호출부에서 매번 await로 순서대로(직렬로) 불려서
+   * 좌석이 많을수록(예: 12개) 왕복 네트워크 지연이 그대로 다 쌓여 느렸어요.
+   * seat_code는 makeUniqueSuffix()로 항상 고유하게 만들고, 좌석 번호(label)도
+   * 호출부가 미리 정해서 넘겨주기 때문에, 여러 addSeat 호출이 동시에(병렬로)
+   * 나가도 번호가 겹치거나 꼬일 위험이 없어요 — 그래서 이제 applySeatsTotal은
+   * 이 호출들을 Promise.all로 한꺼번에 보내요. */
+  const addSeat = (label: string): Promise<string | null> => {
     const tempId = `seat-${makeUniqueSuffix()}`;
     setSeats((prev) => [...prev, { id: tempId, label, status: "비어있음" }]);
 
-    if (!isOwnerLoggedIn || !isApiConfigured()) return;
+    if (!isOwnerLoggedIn || !isApiConfigured()) return Promise.resolve(null);
     // seat_code/seat_type/capacity/floor_number는 화면에 입력칸이 없어서
     // 합리적인 기본값으로 채워요(좌석 이름만 실제로 사장님이 입력한 값이에요).
     // seat_code는 매장 안에서 고유해야 해서 makeUniqueSuffix()로 만들어요.
-    apiOwnerCreateSeat({
+    return apiOwnerCreateSeat({
       seat_code: `S${makeUniqueSuffix()}`,
       seat_name: label,
       seat_type: "NORMAL",
@@ -920,41 +1099,221 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
       floor_number: 1,
     }).then((created) => {
       if (!created) {
-        // ⚠️ 서버 저장에 실패했는데 화면엔 임시 좌석이 그대로 남아있으면,
-        // 그 좌석은 실제로 존재하지 않는데도(가짜 id) 이후 +/-·상태변경·삭제를
+        // ⚠️ (5번째 수정) 타임아웃(status===0)이면 브라우저가 응답을 못
+        // 받았을 뿐, 서버는 이미 좌석 생성을 끝냈을 수 있어요(특히 여러
+        // 좌석을 한꺼번에 만들 때 개발용 백엔드가 느려지는 경우). 이때
+        // 임시 좌석을 화면에서 지워버리면, 서버엔 실제로 좌석이 생겼는데
+        // 사장님 화면에서만 사라져 손님 화면(지도)의 좌석 수와 어긋나요.
+        // 이 경우엔 지우지 말고, 서버 목록을 다시 불러와 진짜 상태로
+        // 맞춰요(중복 임시 좌석은 재동기화하면서 실제 목록으로 교체돼요).
+        if (lastSeatErrorAmbiguous) {
+          setSeatSyncError(
+            (lastSeatError ?? "서버 응답을 확인하지 못했어요.") +
+              " 실제 저장 여부를 다시 확인할게요...",
+          );
+          retrySeatsLoad();
+          return null;
+        }
+        // ⚠️ 서버가 명확히 거절한 경우(예: 422)엔 실제로 저장되지 않은 게
+        // 확실해요. 그런데 화면엔 임시 좌석이 그대로 남아있으면, 그 좌석은
+        // 실제로 존재하지 않는데도(가짜 id) 이후 +/-·상태변경·삭제를
         // 시도할 때마다 서버 요청이 조용히 실패하는 "꼬인" 상태가 계속돼요.
         // 실패한 임시 좌석은 화면에서도 지워서 항상 서버와 같은 상태를 보여주고,
         // 대신 왜 사라졌는지 안내를 남겨요(예전엔 여기서 조용히 사라지기만
         // 해서 "숫자를 입력해도 아무 반응이 없다"는 것처럼 보였어요).
         setSeats((prev) => prev.filter((s) => s.id !== tempId));
         setSeatSyncError(
-          "좌석 저장에 실패했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인해주세요.",
+          lastSeatError ??
+            "좌석 저장에 실패했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인해주세요.",
         );
-        return;
+        return null;
       }
       setSeatSyncError(null);
       // 서버가 발급한 진짜 id로 교체해요. (이후 상태변경/삭제가 서버에도 반영되도록)
+      // ⚠️ api.ts의 apiOwnerCreateSeat이 이제 id가 숫자가 아니면 애초에
+      // null을 돌려주기 때문에(응답 형식이 예상과 다른 경우 포함), 여기
+      // created는 항상 유효한 숫자 id를 가진 좌석이에요 — 예전처럼
+      // "undefined" 문자열이 id로 들어갈 일이 없어요.
+      const realId = String(created.id);
       setSeats((prev) =>
-        prev.map((s) => (s.id === tempId ? { ...s, id: String(created.id) } : s))
+        prev.map((s) => (s.id === tempId ? { ...s, id: realId } : s))
       );
+      return realId;
     });
   };
 
-  const removeSeat = (id: string) => {
+  /** 좌석 하나를 지워요. addSeat과 마찬가지로, 서버가 실제로 지웠는지 여부를
+   * 담아 Promise를 돌려줘서 여러 좌석을 한꺼번에(병렬로) 지울 때도 각각의
+   * 성공/실패를 구분할 수 있게 해요. */
+  const removeSeat = (id: string): Promise<void> => {
     const removed = seats.find((s) => s.id === id);
     setSeats((prev) => prev.filter((s) => s.id !== id));
-    if (!isOwnerLoggedIn || isTempSeatId(id) || !isApiConfigured()) return;
-    void apiOwnerDeleteSeat(id).then((ok) => {
+    if (!isOwnerLoggedIn || isTempSeatId(id) || !isValidRealSeatId(id) || !isApiConfigured())
+      return Promise.resolve();
+    return apiOwnerDeleteSeat(id).then((ok) => {
       if (ok) {
         setSeatSyncError(null);
         return;
       }
-      // 삭제 실패 — 되돌려서 서버와 다시 맞추고 안내해요.
+      // ⚠️ (5번째 수정) 타임아웃(status===0)이면 서버는 이미 삭제를 끝냈을
+      // 수 있어요. 이때 화면에 좌석을 도로 추가하면, 서버엔 이미 없는
+      // 좌석이 사장님 화면에만 되살아나 손님 화면(지도)의 좌석 수와
+      // 어긋나요. 이 경우엔 되살리지 말고 서버 목록을 다시 불러와 맞춰요.
+      if (lastSeatErrorAmbiguous) {
+        setSeatSyncError(
+          (lastSeatError ?? "서버 응답을 확인하지 못했어요.") +
+            " 실제 삭제 여부를 다시 확인할게요...",
+        );
+        retrySeatsLoad();
+        return;
+      }
+      // 서버가 명확히 거절한 삭제 실패 — 되돌려서 서버와 다시 맞추고 안내해요.
       if (removed) setSeats((prev) => [...prev, removed]);
       setSeatSyncError(
-        "좌석 삭제에 실패했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인해주세요.",
+        lastSeatError ??
+          "좌석 삭제에 실패했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인해주세요.",
       );
     });
+  };
+
+  /** "전체 좌석 수"를 원하는 값으로 한 번에 맞춰요(늘리면 새 좌석을 추가하고,
+   * 줄이면 번호가 큰 좌석부터 지워요).
+   * ⚠️ 예전엔 이 조정을 호출한 화면(store/page.tsx)에서 setTimeout으로 각
+   * 요청 사이에 120ms만 살짝 두고 전부 예약해뒀어요. 좌석이 많으면(예: 12개)
+   * 이 예약들이 다 끝나는 데 1초 넘게 걸리는데, 그 사이에 사장님이 "전체
+   * 좌석 수"를 또 바꾸면 두 번째 조정이 아직 반영 안 된(=서버 응답을
+   * 기다리는 중인) 좌석 개수를 기준으로 다시 계산되면서 번호가 겹치거나
+   * 뒤섞인 좌석이 함께 만들어졌어요 — "숫자를 바꾸면 순서가 뒤죽박죽
+   * 섞인다"는 문제의 진짜 원인이었어요.
+   *
+   * ⚠️ (2번째 수정) 그 다음엔 add/removeSeat을 하나씩 순서대로(await) 호출해서
+   * 번호가 꼬이는 문제는 해결했지만, 그 대가로 좌석 수를 조금만 바꿔도
+   * 좌석 개수만큼 왕복 네트워크 요청이 줄줄이 이어져서 체감상 아주 느렸어요
+   * (좌석이 하나씩 지워졌다가 하나씩 다시 채워지는 것처럼 보였던 이유). 또한
+   * 재정렬(번호가 1..N으로 안 맞을 때) 경로에서 "사용중" 상태를 새 번호로
+   * 옮기려고 좌석마다 별도 PATCH를 추가로 더 보냈는데, 그중 일부만 실패해도
+   * 새로 만든 좌석들이 서로 다른 상태로 뒤섞여 보이는("새로 생긴 좌석이
+   * 하나씩 선택되는 게 아니라 뒤죽박죽으로 보인다") 문제로 이어졌어요.
+   *
+   * 지금은: (1) seat_code가 항상 고유하고 번호(label)도 미리 정해서 넘기기
+   * 때문에 여러 add/removeSeat을 서로 겹쳐 보내도 번호가 꼬이진 않아요.
+   * ⚠️ (3번째 수정 → 4번째 수정) 한때 "동시에 보내면 개발용 백엔드가
+   * 못 버틸 것"이라 생각해서 add/removeSeat을 완전히 순서대로(하나 끝나야
+   * 다음 시작)만 보내도록 바꿨었는데, 그렇게 하니 좌석이 여러 개일 때
+   * 화면이 하나씩 아주 천천히 늘어나거나 줄어드는 것처럼 보여서 너무
+   * 느렸어요. 다시 확인해보니 실제 "좌석 수를 바꾸면 오류가 난다"의 진짜
+   * 원인은 동시 요청 자체가 아니라 apiOwnerCreateSeat의 응답 파싱 버그
+   * (아래 별도 수정 참고)였어서, 지금은 완전 순서대로도 완전 동시도 아닌
+   * "한 번에 최대 SEAT_BATCH_CONCURRENCY(4)개까지만 동시에" 방식
+   * (runWithConcurrencyLimit)으로 처리해요 — 체감 속도는 훨씬 빠르면서도
+   * 응답이 한꺼번에 몰리진 않아요.
+   * (2) 재정렬 후 상태를 복원해야 할 때는 좌석마다 따로 PATCH하지 않고
+   * 새로 만든 좌석 id들을 모아서 PATCH /api/owner/seats/availability
+   * (좌석 상태 일괄 변경) 한 번으로 묶어 보내요 — 한 번의 요청이 성공/실패
+   * 둘 중 하나로 끝나서 "일부만 이상한 상태로 보이는" 일이 없어져요. */
+  const applySeatsTotal = async (rawNewTotal: number) => {
+    if (seatsBatchBusy) return;
+    const newTotal = Math.max(0, Math.round(rawNewTotal));
+    if (!Number.isFinite(newTotal)) return;
+    const currentTotal = seats.length;
+    const sorted = sortSeatsByNumber(seats);
+    const compact = isSeatsCompact(sorted);
+    // 개수도 그대로고 번호도 이미 1..N으로 딱 맞으면 할 일이 없어요.
+    if (newTotal === currentTotal && compact) return;
+
+    setSeatsBatchBusy(true);
+    try {
+      if (!compact) {
+        // ⚠️ 좌석 번호가 1..N으로 딱 떨어지지 않는 상태예요(예: "7, 8, 9..."처럼
+        // 예전에 만들었다가 일부만 지워진 좌석이 남아 중간 숫자부터 시작하거나,
+        // 군데군데 번호가 비어있는 경우). 이 상태에서 그냥 "가장 큰 번호+1"부터
+        // 이어붙이면 번호가 영영 1부터 다시 시작하지 못하고 계속 커지기만 해요
+        // — "숫자가 처음부터 안 나오고 계속 중간부터 시작한다"는 문제의 원인.
+        // 그래서 번호가 안 맞을 땐 총 좌석 수를 바꿀 때마다 좌석을 전부 지우고
+        // 1번부터 newTotal개를 다시 만들어서 항상 1,2,3...으로 정렬해요.
+        // 기존 좌석의 "사용중" 상태는(순서를 유지해서) 최대한 그대로 새 번호로
+        // 옮겨줘요 — 그래야 재정렬 한 번으로 사용 중이던 좌석이 전부 "비어있음"
+        // 으로 초기화되는 부작용이 없어요.
+        const keepStatuses = sorted.slice(0, newTotal).map((s) => s.status);
+
+        // 삭제 요청은 최대 4개씩 동시에 진행해요(위 runWithConcurrencyLimit
+        // 설명 참고) — 화면(그리드)은 각 removeSeat 호출 시점에 바로바로
+        // 줄어들어서 눈에 보이는 속도는 빨라요.
+        await runWithConcurrencyLimit(
+          sorted.map((seat) => () => removeSeat(seat.id)),
+          SEAT_BATCH_CONCURRENCY,
+        );
+
+        // 생성도 최대 4개씩 동시에 진행해요. 새로 만든 좌석은 일단 전부
+        // "비어있음"으로 만들어지고(생성 API는 상태를 안 받아요), 실제로
+        // 서버에 만들어진 좌석의 id만 모아둬요(실패한 자리는 null).
+        const createdIds = await runWithConcurrencyLimit(
+          Array.from({ length: newTotal }, (_, i) => () => addSeat(String(i + 1))),
+          SEAT_BATCH_CONCURRENCY,
+        );
+
+        // 원래 "사용중"이었던 좌석만 골라 한 번의 일괄 PATCH로 상태를 복원해요.
+        const toRestore = createdIds
+          .map((id, i) => {
+            const status = keepStatuses[i] ?? "비어있음";
+            if (!id || status === "비어있음") return null;
+            return { id, status: seatStateToApiStatus(status) };
+          })
+          .filter(
+            (u): u is { id: string; status: "UNAVAILABLE" | "MAINTENANCE" } => u !== null,
+          );
+
+        if (toRestore.length > 0) {
+          const ok = await apiOwnerBulkUpdateSeats(toRestore);
+          if (ok) {
+            setSeats((prev) =>
+              prev.map((s) => {
+                const match = toRestore.find((u) => u.id === s.id);
+                return match ? { ...s, status: apiSeatStatusToState(match.status) } : s;
+              }),
+            );
+          } else if (lastSeatErrorAmbiguous) {
+            // ⚠️ (5번째 수정) 타임아웃이면 서버는 이미 상태 복원까지
+            // 끝냈을 수 있어요 — 이 화면 상태(추가+복원 도중이던 값)를
+            // 그냥 믿기보단 서버에서 다시 불러와 확실하게 맞춰요.
+            setSeatSyncError(
+              (lastSeatError ?? "서버 응답을 확인하지 못했어요.") +
+                " 실제 반영 여부를 다시 확인할게요...",
+            );
+            retrySeatsLoad();
+          } else {
+            setSeatSyncError(
+              (lastSeatError ? `${lastSeatError} ` : "") +
+                "좌석은 새로 만들어졌지만, 이용 중이던 좌석의 상태는 복원하지 못했어요. 해당 좌석을 다시 눌러 상태를 맞춰주세요.",
+            );
+          }
+        }
+      } else if (newTotal > currentTotal) {
+        // 번호가 이미 1..currentTotal로 딱 맞는 상태라, 다음 번호는 그냥
+        // currentTotal+1부터 이어 붙이면 항상 1,2,3...이 유지돼요. 새 좌석
+        // 생성 요청은 최대 4개씩 동시에 보내요.
+        const addCount = newTotal - currentTotal;
+        await runWithConcurrencyLimit(
+          Array.from({ length: addCount }, (_, i) => () => addSeat(String(currentTotal + i + 1))),
+          SEAT_BATCH_CONCURRENCY,
+        );
+      } else {
+        // 줄일 때: 비어있는 좌석 중 번호가 큰 것부터 먼저 없애고, 그래도
+        // 목표에 못 미치면(전부 사용 중이면) 사용 중인 좌석도 번호가 큰
+        // 것부터 없애요. (번호가 이미 1..N으로 맞아있으니 남는 좌석은
+        // 그대로 1..newTotal이 돼요.) 삭제 요청도 최대 4개씩 동시에 보내요.
+        const removeCount = currentTotal - newTotal;
+        const emptyDesc = sorted.filter((s) => s.status === "비어있음").slice().reverse();
+        const occupiedDesc = [...sorted].reverse().filter((s) => s.status !== "비어있음");
+        const removalOrder = [...emptyDesc, ...occupiedDesc].slice(0, removeCount);
+        await runWithConcurrencyLimit(
+          removalOrder.map((seat) => () => removeSeat(seat.id)),
+          SEAT_BATCH_CONCURRENCY,
+        );
+      }
+    } finally {
+      setSeatsBatchBusy(false);
+    }
   };
 
   /** 좌석을 전부 지워요. 서버 연결이 끊긴 동안 "좌석 만들기"를 여러 번 눌러
@@ -980,24 +1339,30 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
    * 실패하면 그 좌석은 화면에도 그대로 남겨서 "총 좌석 수"가 실제와 다르게
    * (섣불리 0으로) 보이지 않게 하고, 그래서 "좌석 만들기" 화면도 뜨지 않아
    * 위 3)번 같은 중복 생성 자체가 아예 불가능해요. 진행 중엔 seatsResetting을
-   * true로 둬서 화면(초기화 버튼 등)이 중복 클릭을 막을 수 있게 해요. */
+   * true로 둬서 화면(초기화 버튼 등)이 중복 클릭을 막을 수 있게 해요.
+   *
+   * ⚠️ 삭제 요청은(applySeatsTotal과 같은 이유로) 완전히 순서대로도,
+   * 완전히 동시에도 아닌 최대 4개씩 동시에(runWithConcurrencyLimit)
+   * 보내서 속도와 안정성을 같이 잡아요. */
   const resetAllSeats = () => {
     if (seatsResetting || seats.length === 0) return;
     const targets = seats;
     setSeatsResetting(true);
     setSeatSyncError(null);
 
-    Promise.all(
-      targets.map(async (seat) => {
-        // 임시 id(서버 응답을 기다리는 중 생성된 좌석)는 서버에 아직 없으니
-        // API 호출 없이 그냥 화면에서 지워도 안전해요.
-        if (isTempSeatId(seat.id) || !isOwnerLoggedIn || !isApiConfigured()) {
-          return { seat, ok: true };
-        }
-        const ok = await apiOwnerDeleteSeat(seat.id);
-        return { seat, ok };
-      }),
-    ).then((outcomes) => {
+    (async () => {
+      const outcomes = await runWithConcurrencyLimit(
+        targets.map((seat) => async () => {
+          // 임시 id(서버 응답을 기다리는 중 생성된 좌석)는 서버에 아직
+          // 없으니 API 호출 없이 그냥 화면에서 지워도 안전해요.
+          if (isTempSeatId(seat.id) || !isOwnerLoggedIn || !isApiConfigured()) {
+            return { seat, ok: true };
+          }
+          const ok = await apiOwnerDeleteSeat(seat.id);
+          return { seat, ok };
+        }),
+        SEAT_BATCH_CONCURRENCY,
+      );
       const failedIds = new Set(
         outcomes.filter((o) => !o.ok).map((o) => o.seat.id),
       );
@@ -1005,12 +1370,15 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
       setSeatsResetting(false);
       if (failedIds.size > 0) {
         setSeatSyncError(
-          `좌석 ${failedIds.size}개는 삭제하지 못했어요. 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인한 뒤 다시 시도해주세요.`,
+          `좌석 ${failedIds.size}개는 삭제하지 못했어요.` +
+            (lastSeatError
+              ? ` ${lastSeatError}`
+              : " 백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할 수 있는지 확인한 뒤 다시 시도해주세요."),
         );
       } else {
         setSeatSyncError(null);
       }
-    });
+    })();
   };
 
   // ⚠️ 예전엔 서버 응답 성공 여부를 확인하지 않고(fire-and-forget) 화면만 먼저
@@ -1019,11 +1387,18 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   // 그대로 남아있어서 "분명 접수했는데 다시 접수 대기로 뜬다"는 문제가 생겼어요.
   // 이제 서버 응답을 기다렸다가, 실패하면 화면도 원래 상태로 되돌리고 콘솔에
   // 이유를 남겨서 "화면과 서버가 서로 다른 상태"가 되지 않게 해요.
+  // ⚠️ (2번째 수정) 실패했을 때 화면을 되돌리는 것까지는 됐지만, 호출부(버튼)가
+  // 이 결과를 전혀 못 받아서(void로 던지고 끝) 실패해도 화면엔 아무 안내가
+  // 없었어요. 특히 "결제대기 주문 취소" 버튼은 누르자마자 바로 이전 화면으로
+  // 돌아가 버려서(router.back()), 되돌려지는 순간 자체를 사장님이 볼 수도
+  // 없었어요 — 그래서 나중에(재로그인 후) "분명 취소했는데 왜 또 결제대기로
+  // 보이지?"처럼 느껴졌어요. 이제 성공/실패와 실패 사유를 그대로 돌려줘서
+  // 호출부가 실패를 확인한 뒤에만 화면을 넘어가게 할 수 있어요.
   const updateOrderStatus = async (
     id: string,
     nextStatus: OrderState,
     apiStatus: "CONFIRMED" | "PREPARING" | "READY" | "COMPLETED" | "REJECTED" | "CANCELLED",
-  ) => {
+  ): Promise<{ ok: boolean; message?: string }> => {
     let prevStatus: OrderState | undefined;
     // 지금 이 순간 이전에 이미 나가 있던 폴링 응답은(도착이 늦어도) 더 이상
     // 반영되지 않도록 번호를 올려요 — 그래야 그 응답이 이 낙관적 업데이트를
@@ -1036,34 +1411,41 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
         return { ...o, status: nextStatus };
       }),
     );
-    if (!isOwnerLoggedIn) return;
-    const ok = await apiOwnerUpdateOrderStatus(id, apiStatus);
+    if (!isOwnerLoggedIn) return { ok: true };
+    const result = await apiOwnerUpdateOrderStatus(id, apiStatus);
     // 서버 응답을 기다리는 동안 이미 새로운 폴링/다른 상태변경이 시작됐을 수
     // 있으니, 다시 한번 번호를 올려서 이 요청보다 먼저 나간 응답이 뒤늦게
     // 와도 무시되게 해요.
     ordersRequestIdRef.current++;
-    if (!ok) {
+    if (!result.ok) {
       // eslint-disable-next-line no-console
       console.error(
-        `[updateOrderStatus] 주문 #${id} 상태를 ${apiStatus}(으)로 저장하지 못했어요. 화면을 원래 상태로 되돌려요.`,
+        `[updateOrderStatus] 주문 #${id} 상태를 ${apiStatus}(으)로 저장하지 못했어요(${result.message ?? "사유 불명"}). 화면을 원래 상태로 되돌려요.`,
       );
       if (prevStatus) {
         setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status: prevStatus! } : o)));
       }
-      return;
+      return {
+        ok: false,
+        message: result.message ?? "서버에 저장하지 못했어요. 잠시 후 다시 시도해주세요.",
+      };
     }
     // ⚠️ 주문을 "완료"로 바꾸면 그게 곧 실제 매출이 발생한 시점인데, 홈 화면의
     // "오늘 매출" 카드는 8초 폴링이나 페이지 재방문 전까지는 갱신되지 않았어요.
     // 그래서 방금 완료 처리한 주문 금액이 매출에 안 잡힌 것처럼 보였어요.
     // 완료 처리가 서버에 성공하자마자 매출을 바로 다시 불러와요.
     if (nextStatus === "완료") refetchSales();
+    return { ok: true };
   };
 
   const acceptOrder = (id: string) => void updateOrderStatus(id, "준비중", "CONFIRMED");
   const rejectOrder = (id: string) => void updateOrderStatus(id, "취소됨", "REJECTED");
   const markOrderReady = (id: string) => void updateOrderStatus(id, "준비완료", "READY");
   const completeOrder = (id: string) => void updateOrderStatus(id, "완료", "COMPLETED");
-  const cancelOrder = (id: string) => void updateOrderStatus(id, "취소됨", "CANCELLED");
+  // ⚠️ "결제대기 주문 취소" 화면이 성공 여부를 보고 나서만 이전 화면으로
+  // 돌아갈 수 있도록, 다른 액션들과 달리 void로 던지지 않고 결과를 그대로
+  // 돌려줘요.
+  const cancelOrder = (id: string) => updateOrderStatus(id, "취소됨", "CANCELLED");
 
   const addMenuItem = async (
     item: Omit<OwnerMenuItem, "id">
@@ -1205,6 +1587,8 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
       seatsLoading,
       seatsLoadFailed,
       seatsResetting,
+      seatsBatchBusy,
+      applySeatsTotal,
       retrySeatsLoad,
       seatSyncError,
       congestion,
@@ -1215,6 +1599,9 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
       completeOrder,
       cancelOrder,
       menu,
+      menusLoading,
+      menusLoadFailed,
+      retryMenusLoad,
       addMenuItem,
       updateMenuItem,
       removeMenuItem,
@@ -1240,9 +1627,12 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
       seatsLoading,
       seatsLoadFailed,
       seatsResetting,
+      seatsBatchBusy,
       serverCongestion,
       orders,
       menu,
+      menusLoading,
+      menusLoadFailed,
       reviews,
       settings,
       inquiries,

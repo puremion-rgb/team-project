@@ -47,7 +47,14 @@ export default function OrderDetailPage({
     );
   }
 
-  const canCancel = order.status === "주문접수";
+  // ⚠️ "결제 대기인 채로 남은 테스트 주문을 지울 방법이 없다"는 문제의 원인:
+  // 취소 버튼이 "주문접수" 상태에서만 떴어요. 그런데 결제 중 오류 등으로 결제가
+  // 끝나지 않은 "결제대기" 주문은 애초에 사장님이 접수/거절할 수 있는 단계까지도
+  // 못 가서, 손님이 여기서 직접 취소하는 것 말고는 이 상태를 빠져나올 방법이
+  // 없었어요. 서버에도 결제대기 주문을 취소하는 전용 API(POST
+  // /api/users/me/orders/{order}/cancel)가 이미 있으니, 결제대기 상태에서도
+  // 취소 버튼을 보여줘요.
+  const canCancel = order.status === "결제대기" || order.status === "주문접수";
 
   const handleCancel = async () => {
     setCancelling(true);

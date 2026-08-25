@@ -806,6 +806,65 @@ export function extractReviewImageUrls(
     .filter((url): url is string => !!url);
 }
 
+/** 리뷰 작성자 표시 이름을 최대한 넓게 찾아봐요. 스웨거에 이 응답의 정확한
+ * 스키마가 없어서(200만 명시), 실제 필드명이 customer_name이 아닐 수 있어요.
+ * 흔히 쓰이는 후보 필드명과, user/author/customer/reviewer처럼 중첩된 객체
+ * 안의 이름까지 넓게 시도해서 찾아요. 그래도 못 찾으면 null을 돌려주고,
+ * 화면(mapApiReviewToOwnerReview / 카페 상세 리뷰 탭)에서 review.user_id로
+ * "손님 #123" 같은 최소 구분 표시로 대체해요("그냥 고객이라고만 나오고 누가
+ * 썼는지 구분이 안 된다"는 문제의 대응책이에요). */
+function extractReviewerName(raw: Record<string, unknown>): string | null {
+  const direct = pick<string>(raw, [
+    "customer_name",
+    "user_name",
+    "reviewer_name",
+    "author_name",
+    "nickname",
+    "display_name",
+    "name",
+  ]);
+  if (direct && String(direct).trim().length > 0) return String(direct);
+
+  for (const key of ["user", "author", "customer", "reviewer"]) {
+    const nested = raw[key];
+    if (nested && typeof nested === "object") {
+      const nestedName = pick<string>(nested as Record<string, unknown>, [
+        "name",
+        "nickname",
+        "display_name",
+      ]);
+      if (nestedName && String(nestedName).trim().length > 0) return String(nestedName);
+    }
+  }
+  return null;
+}
+
+function parseReview(raw: Record<string, unknown>): ApiReview {
+  return {
+    id: Number(pick(raw, ["id"]) ?? 0),
+    user_id: Number(pick(raw, ["user_id", "customer_id"]) ?? 0),
+    store_id: Number(pick(raw, ["store_id"]) ?? 0),
+    rating: Number(pick(raw, ["rating"]) ?? 0),
+    content: String(pick(raw, ["content"]) ?? ""),
+    created_at: String(pick(raw, ["created_at"]) ?? ""),
+    updated_at: pick<string>(raw, ["updated_at"]),
+    customer_name: extractReviewerName(raw),
+    images: (pick(raw, ["images"]) as ApiReviewImage[] | undefined) ?? null,
+    reply: pick(raw, ["reply"]) as ApiReview["reply"],
+    reply_id: pick(raw, ["reply_id"]) as number | string | undefined,
+  };
+}
+
+/** 리뷰 작성자를 화면에 표시할 최종 문구. 이름을 못 찾았을 때도 "고객"
+ * 하나로만 뭉뚱그리지 않고 user_id로 서로 다른 사람인지는 구분되게 해요. */
+export function reviewerDisplayName(review: ApiReview): string {
+  if (review.customer_name && review.customer_name.trim().length > 0) {
+    return review.customer_name;
+  }
+  if (review.user_id) return `손님 #${review.user_id}`;
+  return "고객";
+}
+
 /** GET /api/stores/{store}/reviews */
 export async function apiGetStoreReviews(
   storeId: string | number,
@@ -817,12 +876,20 @@ export async function apiGetStoreReviews(
     // 처리해서 응답 모양이 예상과 다르다는 이유만으로 리뷰가 안 보이는 일이
     // 없게 해요. 로그인한 손님으로 요청해야만 리뷰를 내려주는 서버일 수도
     // 있어서 authAs도 함께 보내요(비로그인이어도 서버가 무시하면 그만이에요).
-    const res = await apiFetch<{ data: ApiReview[] } | ApiReview[]>(
+    const res = await apiFetch<unknown>(
       `/api/stores/${encodeURIComponent(String(storeId))}/reviews`,
       { authAs: "customer" },
     );
-    if (Array.isArray(res)) return res;
-    return res?.data ?? [];
+    const rows: unknown[] = Array.isArray(res)
+      ? res
+      : res && typeof res === "object" && Array.isArray((res as { data?: unknown }).data)
+        ? (res as { data: unknown[] }).data
+        : [];
+    // ⚠️ 작성자 이름 필드명이 문서화돼 있지 않아서(customer_name 하나만 믿고
+    // 있었어요) 실제 서버 필드명이 다르면 전부 "고객"으로만 보였어요. 이제
+    // parseReview가 여러 후보 필드명을 넓게 시도해서 최대한 실제 이름을
+    // 찾아내요.
+    return rows.map((r) => parseReview(r as Record<string, unknown>));
   } catch {
     return null;
   }
@@ -1886,13 +1953,24 @@ const ORDER_STATUS_CANDIDATES: Record<string, string[]> = {
  * 흔한 동의어로 재시도해요. ⚠️ 이 요청이 실제로 성공해야만 사장님이 로그아웃 후
  * 다시 들어와도 상태가 유지돼요 — 실패했는데도 화면만 바뀐 것처럼 보이면
  * (예전 방식: 결과를 확인 안 하고 그냥 fire-and-forget), 재로그인 시 서버에
- * 남아있는 원래 상태(예: 주문접수)로 되돌아온 것처럼 보이는 문제가 생겨요. */
+ * 남아있는 원래 상태(예: 주문접수)로 되돌아온 것처럼 보이는 문제가 생겨요.
+ *
+ * ⚠️ 예전엔 성공 여부만 boolean으로 돌려줘서, 실패해도 "왜" 실패했는지(422
+ * 검증 실패인지, 인증 문제인지, 서버가 아예 응답을 안 하는지) 화면에서 전혀
+ * 알 수 없었어요. 특히 "결제대기" 주문 취소처럼 후보 상태값 전부가 거절될
+ * 수 있는 경우, 실패해도 조용히 원래 상태로 되돌아가기만 해서 사장님은 취소가
+ * 됐다고 착각하고 넘어갔다가 나중에(재로그인 후) 다시 "결제대기"로 보이는
+ * 원인을 알 수 없었어요. 이제 서버가 실제로 돌려준 상태코드·메시지를 그대로
+ * 보존해서, 실패했을 때 그 이유를 화면에 보여줄 수 있게 해요. */
 export async function apiOwnerUpdateOrderStatus(
   orderId: string | number,
   status: "CONFIRMED" | "PREPARING" | "READY" | "COMPLETED" | "REJECTED" | "CANCELLED",
-): Promise<boolean> {
-  if (!isApiConfigured()) return false;
+): Promise<{ ok: boolean; httpStatus?: number; message?: string }> {
+  if (!isApiConfigured()) {
+    return { ok: false, message: "백엔드 서버 주소가 설정되어 있지 않아요." };
+  }
   const candidates = ORDER_STATUS_CANDIDATES[status] ?? [status];
+  let lastError: { httpStatus?: number; message?: string } = {};
   for (const candidate of candidates) {
     try {
       await apiFetch(`/api/owner/orders/${encodeURIComponent(String(orderId))}/status`, {
@@ -1900,12 +1978,18 @@ export async function apiOwnerUpdateOrderStatus(
         body: { status: candidate },
         authAs: "owner",
       });
-      return true;
+      return { ok: true };
     } catch (err) {
       // 422(상태 검증 실패)면 다음 후보로 재시도하고, 그 외 오류(인증/권한/네트워크)면
-      // 재시도해도 어차피 안 되니 바로 포기해요.
-      if (err instanceof ApiError && err.status === 422) continue;
-      return false;
+      // 재시도해도 어차피 안 되니 바로 포기해요. 어느 쪽이든 실제 오류 내용은
+      // 남겨서 호출부가 화면에 보여줄 수 있게 해요.
+      if (err instanceof ApiError) {
+        lastError = { httpStatus: err.status, message: err.message };
+        if (err.status === 422) continue;
+      } else {
+        lastError = { message: "네트워크 오류로 서버에 연결하지 못했어요." };
+      }
+      return { ok: false, ...lastError };
     }
   }
   // eslint-disable-next-line no-console
@@ -1914,7 +1998,7 @@ export async function apiOwnerUpdateOrderStatus(
       ", ",
     )}) 전부 422로 거절됐어요. 이 주문이 이미 취소/완료된 상태이거나(먼저 GET .../orders로 현재 status를 확인해보세요), 이 목록에 실제 enum 값이 없을 수 있어요 — 백엔드에 이 엔드포인트가 실제로 받는 status 값을 문의해주세요.`,
   );
-  return false;
+  return { ok: false, ...lastError };
 }
 
 /** POST /api/owner/reviews/{review}/reply
@@ -2125,6 +2209,62 @@ export type ApiSeat = {
   is_active: boolean;
 };
 
+/** 좌석 생성/삭제/상태변경/일괄변경이 실패했을 때 "진짜 이유"를 남겨둬요.
+ * ⚠️ 예전엔 이 네 함수가 성공 여부(boolean)만 돌려주고 실패 사유는 그냥
+ * catch에서 삼켜버렸어요. 그래서 owner-store.tsx는 실패 원인이 진짜
+ * 네트워크 단절이든, 422 검증 실패(예: 중복된 좌석 번호, 잘못된 상태값)든
+ * 상관없이 항상 "백엔드 서버 주소(192.168.x.x)에 지금 이 기기에서 접속할
+ * 수 있는지 확인해주세요"라는 네트워크 문제 안내만 보여줬어요. 실제로는
+ * 서버에 연결은 됐지만 요청 내용이 거부된 경우에도 같은 문구가 떠서, 원인
+ * 파악이 안 되는 문제로 이어졌어요(예: 화면의 "16개 전부 사용중으로 보이는데
+ * 저장이 실패한다" 같은 증상을 조사할 때도 이 네트워크 문구만으로는 진짜
+ * 원인을 알 수 없었어요). apiCreateOrder(lastCreateOrderError)와 같은
+ * 패턴으로, 실제 HTTP 상태코드/서버 메시지를 여기 남겨서 owner-store.tsx가
+ * 더 정확한 안내를 보여줄 수 있게 해요. */
+export let lastSeatError: string | null = null;
+
+/** ⚠️ (5번째 수정 — "두 번째로 숫자를 바꾸면 실패한다" 원인)
+ * status===0(네트워크 오류/AbortController 타임아웃)은 "서버가 요청을
+ * 거절했다"는 게 아니라 "응답을 못 받았다"는 뜻일 뿐이에요. 개발용
+ * `php artisan serve`는 요청을 한 번에 하나씩만 처리하는 단일 스레드라서,
+ * 화면에 떠 있는 8초 폴링(매출/주문/메뉴/예약 등)이 여러 개 겹친 상태에서
+ * 좌석 총 개수를 다시 조정하면(=addSeat/removeSeat이 병렬로 여러 번 나감)
+ * 요청 자체는 서버에 이미 도착해서 처리(좌석 생성/삭제)까지 끝났는데,
+ * 그 결과를 브라우저로 돌려주는 게 우리 쪽 15초 타임아웃보다 늦어질 수
+ * 있어요. 이 경우 프론트는 "실패"로 보고 방금 만든/지운 좌석을 화면에서
+ * 되돌리는데, 서버는 이미 처리를 끝낸 상태라 실제로는 "성공"이에요.
+ * → 손님 화면(지도)은 서버 값을 그대로 보여주니 새 좌석 수(예: 16)가
+ * 바로 반영되는데, 사장님 화면은 되돌아간 옛날 값 + 실패 안내만 보여줘서
+ * "사장님 화면에서는 안 바뀌는데 손님 화면에서는 바뀌어 있다"는 정확히
+ * 이 증상으로 이어졌어요.
+ * status===0일 때만 "결과를 확실히 알 수 없음(ambiguous)"으로 표시해서,
+ * 호출부(owner-store.tsx)가 이럴 때는 낙관적 화면을 억지로 되돌리는 대신
+ * 서버에서 좌석 목록을 다시 불러와(재동기화) 실제 상태로 맞추게 해요.
+ * 반대로 422 같은 진짜 거절(status>0)은 서버가 명확히 거부한 거라 그대로
+ * 되돌리는 게 맞아요 — 그 경우는 계속 false로 둬요. */
+export let lastSeatErrorAmbiguous = false;
+
+function describeSeatApiError(err: unknown): string {
+  lastSeatErrorAmbiguous = false;
+  if (err instanceof ApiError) {
+    const fieldMsg = err.fieldErrors
+      ? " " +
+        Object.entries(err.fieldErrors)
+          .map(([field, msgs]) => `${field}: ${msgs.join(", ")}`)
+          .join(" / ")
+      : "";
+    if (err.status === 0) {
+      // apiFetch가 fetch 자체(네트워크 오류/타임아웃)에서 실패한 경우에만
+      // status가 0이에요 — 이때만 "기기 접속 확인" 안내가 실제로 맞고,
+      // 동시에 "서버가 실제로 처리했는지 우리는 모른다"는 뜻이기도 해요.
+      lastSeatErrorAmbiguous = true;
+      return err.message;
+    }
+    return `서버가 요청을 거부했어요 (${err.status}): ${err.message}${fieldMsg}`;
+  }
+  return err instanceof Error ? err.message : "알 수 없는 오류가 발생했어요.";
+}
+
 /** GET /api/owner/seats — 좌석 목록 조회.
  * 2026-08-19 "사장님 운영정보 재로그인 복원" 문서(섹션 11-4)로 확정된 경로.
  * ⚠️ 예전엔 `/api/owner/stores/{store}/seats`(storeId를 URL에 넣는 경로)를 썼는데,
@@ -2155,14 +2295,54 @@ export async function apiOwnerCreateSeat(input: {
   capacity: number;
   floor_number: number;
 }): Promise<ApiSeat | null> {
-  if (!isApiConfigured()) return null;
+  lastSeatError = null;
+  if (!isApiConfigured()) {
+    lastSeatError = "백엔드 서버 주소(NEXT_PUBLIC_API_BASE_URL)가 설정돼 있지 않아요.";
+    return null;
+  }
   try {
-    return await apiFetch<ApiSeat>("/api/owner/seats", {
-      method: "POST",
-      body: input,
-      authAs: "owner",
-    });
-  } catch {
+    // ⚠️ (진짜 원인 발견) 이 API의 실제 응답은 좌석 객체를 바로 돌려주지
+    // 않고, apiOwnerCreateMenu(메뉴 생성)와 같은 패턴으로 { seat: {...} }
+    // 또는 { data: {...} }로 한 번 감싸서 와요. 예전엔 응답을 그대로
+    // ApiSeat이라고 가정해서 created.id를 읽었는데, 실제로는 최상위에
+    // id가 없어서 항상 undefined였고, owner-store.tsx가 이걸
+    // String(created.id)로 만들면서 새로 만든 좌석마다 전부 문자열
+    // "undefined"가 id로 붙어버렸어요. 그 결과:
+    //   - 새로 만든 좌석이 여러 개면 전부 같은 id("undefined")를 갖게 돼서,
+    //     그중 하나를 눌러도 상태변경(setSeats의 id 매칭)이 전부 다
+    //     함께 걸려 "여러 개가 한꺼번에 선택되는" 것처럼 보였고,
+    //   - 그 좌석을 다시 누르면 PATCH /api/owner/seats/undefined로
+    //     요청이 나가 404("No query results ... undefined")로 실패했고,
+    //   - 여러 좌석 상태를 한 번에 복원하는 일괄 PATCH에서도 id가 전부
+    //     "undefined"로 겹쳐서 422("has a duplicate value")로 실패했어요.
+    // 이제 응답이 어떤 모양으로 오든(감싸져 있든 아니든) 실제 좌석
+    // 객체를 찾아내고, 그래도 id가 숫자가 아니면 "생성은 됐지만 응답을
+    // 알 수 없는" 상태로 보고 실패 처리해서 "undefined" id가 화면에
+    // 절대 남지 않게 해요.
+    // ⚠️ 총 좌석 수를 늘릴 때는 이 요청이 최대 SEAT_BATCH_CONCURRENCY(4)개까지
+    // 동시에 나가고, 그 사이 화면의 8초 폴링(매출/주문/메뉴/예약)까지 겹칠 수
+    // 있어요. 개발용 `php artisan serve`(단일 스레드)에서는 이 요청들이 줄줄이
+    // 밀려 처리되면서 기본 15초 타임아웃을 넘기기 쉬워요(특히 방금 한 번 더
+    // 좌석 수를 바꾼 "두 번째" 요청에서). 처리 자체는 결국 끝나는데 응답만
+    // 늦는 상황이라, 좌석 생성처럼 무거워질 수 있는 요청에는 여유 시간을 더 줘요.
+    const res = await apiFetch<{ seat?: ApiSeat; data?: ApiSeat } & Partial<ApiSeat>>(
+      "/api/owner/seats",
+      {
+        method: "POST",
+        body: input,
+        authAs: "owner",
+        timeoutMs: 30000,
+      },
+    );
+    const seat = (res.seat ?? res.data ?? (res as ApiSeat)) as ApiSeat | undefined;
+    if (!seat || typeof seat.id !== "number") {
+      lastSeatError =
+        "좌석이 서버에 만들어졌는지 확인하지 못했어요(응답 형식이 예상과 달라요). 새로고침 후 다시 확인해주세요.";
+      return null;
+    }
+    return seat;
+  } catch (err) {
+    lastSeatError = describeSeatApiError(err);
     return null;
   }
 }
@@ -2171,14 +2351,21 @@ export async function apiOwnerCreateSeat(input: {
 export async function apiOwnerDeleteSeat(
   seatId: string | number,
 ): Promise<boolean> {
-  if (!isApiConfigured()) return false;
+  lastSeatError = null;
+  if (!isApiConfigured()) {
+    lastSeatError = "백엔드 서버 주소(NEXT_PUBLIC_API_BASE_URL)가 설정돼 있지 않아요.";
+    return false;
+  }
   try {
+    // apiOwnerCreateSeat과 같은 이유(위 주석 참고)로 여유 시간을 더 줘요.
     await apiFetch(`/api/owner/seats/${encodeURIComponent(String(seatId))}`, {
       method: "DELETE",
       authAs: "owner",
+      timeoutMs: 30000,
     });
     return true;
-  } catch {
+  } catch (err) {
+    lastSeatError = describeSeatApiError(err);
     return false;
   }
 }
@@ -2193,15 +2380,23 @@ export async function apiOwnerBulkUpdateSeats(
     status: "AVAILABLE" | "UNAVAILABLE" | "MAINTENANCE";
   }>,
 ): Promise<boolean> {
-  if (!isApiConfigured() || updates.length === 0) return false;
+  lastSeatError = null;
+  if (!isApiConfigured()) {
+    lastSeatError = "백엔드 서버 주소(NEXT_PUBLIC_API_BASE_URL)가 설정돼 있지 않아요.";
+    return false;
+  }
+  if (updates.length === 0) return false;
   try {
+    // apiOwnerCreateSeat과 같은 이유(위 주석 참고)로 여유 시간을 더 줘요.
     await apiFetch("/api/owner/seats/availability", {
       method: "PATCH",
       body: { seats: updates.map((u) => ({ id: u.id, status: u.status })) },
       authAs: "owner",
+      timeoutMs: 30000,
     });
     return true;
-  } catch {
+  } catch (err) {
+    lastSeatError = describeSeatApiError(err);
     return false;
   }
 }
@@ -2267,15 +2462,21 @@ export async function apiOwnerUpdateSeat(
   seatId: string | number,
   status: "AVAILABLE" | "UNAVAILABLE" | "MAINTENANCE",
 ): Promise<boolean> {
-  if (!isApiConfigured()) return false;
+  lastSeatError = null;
+  if (!isApiConfigured()) {
+    lastSeatError = "백엔드 서버 주소(NEXT_PUBLIC_API_BASE_URL)가 설정돼 있지 않아요.";
+    return false;
+  }
   try {
     await apiFetch(`/api/owner/seats/${encodeURIComponent(String(seatId))}`, {
       method: "PATCH",
       body: { status },
       authAs: "owner",
+      timeoutMs: 20000,
     });
     return true;
-  } catch {
+  } catch (err) {
+    lastSeatError = describeSeatApiError(err);
     return false;
   }
 }

@@ -9,6 +9,7 @@ import StarRating from "@/components/StarRating";
 import Toast from "@/components/Toast";
 import { useReviews } from "@/lib/reviews-store";
 import { useStores } from "@/lib/stores-store";
+import { useAuth } from "@/lib/auth-store";
 import { apiUploadImage, resolveImageUrl } from "@/lib/api";
 
 /** 첨부 사진 한 장의 상태.
@@ -27,6 +28,11 @@ function ReviewWriteContent() {
   const params = useSearchParams();
   const { getReview, addReview, updateReview } = useReviews();
   const { getCafe } = useStores();
+  // ⚠️ 리뷰를 "지금" 쓰는 시점의 닉네임을 리뷰에 함께 저장해두기 위해서예요.
+  // 카페 상세 화면이 방금 쓴 리뷰를 실시간 profile.name으로 표시하면,
+  // 로그인 프로필이 서버에서 아직 안 불러와진 순간엔 이름이 비어있어서
+  // 잠깐 "나"로 보였다가 몇 초 뒤 실제 이름으로 바뀌는 문제가 있었어요.
+  const { profile } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const reviewId = params.get("reviewId");
@@ -98,7 +104,15 @@ function ReviewWriteContent() {
       if (existingReview) {
         updateReview(existingReview.id, { rating, content, images });
       } else {
-        addReview({ cafeId, cafeName, rating, content, images, orderId });
+        addReview({
+          cafeId,
+          cafeName,
+          rating,
+          content,
+          images,
+          orderId,
+          authorName: profile.name.trim().length > 0 ? profile.name : undefined,
+        });
       }
       setSaved(true);
       setTimeout(() => router.push("/my/reviews"), 900);

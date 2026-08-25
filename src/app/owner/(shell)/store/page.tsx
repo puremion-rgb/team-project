@@ -3,76 +3,28 @@
 import { useEffect, useMemo, useState } from "react";
 import { Armchair } from "lucide-react";
 import Header from "@/components/Header";
-import { useOwner, type OwnerSeat } from "@/lib/owner-store";
+import { useOwner, sortSeatsByNumber, type OwnerSeat } from "@/lib/owner-store";
 import { congestionStyle, remainingMessage } from "@/lib/seat-congestion";
-
-/** 좌석 라벨(문자열)을 숫자로 정렬하기 위한 비교 함수. 예전 데이터에 A1처럼
- * 숫자가 아닌 라벨이 남아있어도(마이그레이션 이전 매장) 에러 없이 뒤로 보내요. */
-function sortByNumber(seats: OwnerSeat[]) {
-  return [...seats].sort((a, b) => {
-    const na = Number(a.label);
-    const nb = Number(b.label);
-    if (Number.isNaN(na) && Number.isNaN(nb)) return a.label.localeCompare(b.label);
-    if (Number.isNaN(na)) return 1;
-    if (Number.isNaN(nb)) return -1;
-    return na - nb;
-  });
-}
 
 export default function OwnerStorePage() {
   const {
     seats,
     congestion,
     setSeatStatus,
-    addSeat,
-    removeSeat,
     seatSyncError,
     seatsLoading,
     seatsLoadFailed,
     seatsResetting,
+    seatsBatchBusy,
+    applySeatsTotal,
     retrySeatsLoad,
   } = useOwner();
   const [setupCount, setSetupCount] = useState("");
 
-  const sortedSeats = useMemo(() => sortByNumber(seats), [seats]);
+  const sortedSeats = useMemo(() => sortSeatsByNumber(seats), [seats]);
   const total = seats.length;
   const occupied = seats.filter((s) => s.status !== "비어있음").length;
   const remaining = total - occupied;
-
-  /** 총 좌석 수를 원하는 값으로 직접 맞춰요(맨 위 "전체 좌석 수" 입력칸에 새
-   * 숫자를 넣고 확정하면 호출돼요).
-   * ⚠️ 여러 석을 한 번에 조정할 수 있어야 해서, 컴포넌트의 `seats` state가
-   * 아직 갱신되지 않은(리렌더 전) 시점에도 정확히 동작하도록 새 좌석 번호와
-   * 제거할 좌석 목록을 이 함수 안에서 한 번에 미리 계산해요(반복문 안에서
-   * addSeat/removeSeat을 여러 번 부르면서 매번 최신 `seats`를 읽으려고 하면,
-   * 리액트가 상태 갱신을 몰아서 처리하는 동안 계속 같은(오래된) `seats`를
-   * 참조하게 돼 번호가 겹치는 등 오동작할 수 있어요). */
-  const applyTotalTarget = (rawNewTotal: number) => {
-    const newTotal = Math.max(0, Math.round(rawNewTotal));
-    if (!Number.isFinite(newTotal) || newTotal === total) return;
-
-    if (newTotal > total) {
-      // 새 좌석은 항상 "비어있음" 상태로, 현재 가장 큰 번호 다음부터 순서대로 추가해요.
-      const numericLabels = seats.map((s) => Number(s.label)).filter((n) => Number.isFinite(n));
-      let nextLabel = Math.max(total, numericLabels.length > 0 ? Math.max(...numericLabels) : 0);
-      const addCount = newTotal - total;
-      for (let i = 0; i < addCount; i++) {
-        nextLabel += 1;
-        const label = String(nextLabel);
-        // handleSetup과 같은 이유로 살짝 시간차를 둬서 순차적으로 저장해요.
-        setTimeout(() => addSeat(label), i * 120);
-      }
-      return;
-    }
-
-    // 줄일 때: 비어있는 좌석 중 번호가 큰 것부터 먼저 없애고, 그래도 목표에
-    // 못 미치면(전부 사용 중이면) 사용 중인 좌석도 번호가 큰 것부터 없애요.
-    const removeCount = total - newTotal;
-    const emptyDesc = sortedSeats.filter((s) => s.status === "비어있음").slice().reverse();
-    const occupiedDesc = [...sortedSeats].reverse().filter((s) => s.status !== "비어있음");
-    const removalOrder = [...emptyDesc, ...occupiedDesc].slice(0, removeCount);
-    removalOrder.forEach((seat) => removeSeat(seat.id));
-  };
 
   // 맨 위 "전체 좌석 수"는 평소엔 숫자만 보여주다가, 탭하면 그 자리에서 바로
   // 수정할 수 있는 입력칸으로 바뀌어요. 서버에서 좌석 수가 바뀌어 들어오면
@@ -87,29 +39,36 @@ export default function OwnerStorePage() {
     setTotalDraft(String(total));
     setEditingTotal(true);
   };
+  // ⚠️ 좌석을 여러 개 한꺼번에 추가/삭제할 때(총 좌석 수 조정) 서버 요청을
+  // 순서대로(직렬로) 처리해야 번호가 꼬이지 않아요 — 자세한 이유는
+  // owner-store.tsx의 applySeatsTotal 주석 참고. 그 처리가 끝나기 전까지는
+  // (seatsBatchBusy) 여기서 새로 조정 요청을 보내지 않아요.
   const commitEditTotal = () => {
     setEditingTotal(false);
+    if (seatsBatchBusy) return;
     const n = Number(totalDraft);
-    if (Number.isFinite(n) && n >= 0) applyTotalTarget(n);
+    if (Number.isFinite(n) && n >= 0) void applySeatsTotal(n);
   };
 
   const handleSetup = () => {
+    if (seatsBatchBusy) return;
     const n = Number(setupCount);
     if (!Number.isFinite(n) || n <= 0) return;
-    // ⚠️ 좌석을 한꺼번에 여러 개(예: 12개) 만들 때 POST 요청을 전부 동시에
-    // 쏘면, 개발용 백엔드가 한 번에 하나씩만 처리하다가 뒤로 밀린 요청들이
-    // 타임아웃/요청 제한(429)에 걸리기 쉬워요. 살짝(120ms씩) 시간차를 둬서
-    // 서버가 순서대로 처리할 여유를 줘요 — 화면에는 즉시 전부 보이고, 서버
-    // 저장만 약간 순차적으로 이어져요.
-    for (let i = 1; i <= n; i++) {
-      setTimeout(() => addSeat(String(i)), (i - 1) * 120);
-    }
+    void applySeatsTotal(n);
     setSetupCount("");
   };
 
   /** 좌석 하나를 탭하면 바로 상태가 바뀌어요 — 별도 "확인" 저장 단계 없이
-   * 비어있음 ↔ 사용중을 즉시 토글해요. */
+   * 비어있음 ↔ 사용중을 즉시 토글해요.
+   * ⚠️ 총 좌석 수를 조정하는 중(seatsBatchBusy)이거나 초기화하는 중
+   * (seatsResetting)에는 좌석 칸이 실시간으로 늘어나거나 사라지면서 화면
+   * 배치가 계속 바뀌어요. 이 동안 좌석 칸이 계속 클릭 가능한 상태로 남아있으면,
+   * 사용자가 같은 자리를 다시 누르는 순간 그 자리에 다른 좌석이 들어와 있어서
+   * "누른 적 없는 좌석"이 한꺼번에 토글되고, 그 상태변경 요청들이 지금 한창
+   * 진행 중인 추가/삭제 요청과 겹치면서 저장 실패("좌석 상태 저장에 실패했어요")
+   * 경고까지 함께 뜨는 문제로 이어졌어요. 조정이 끝날 때까지는 탭을 무시해요. */
   const toggleSeat = (seat: OwnerSeat) => {
+    if (seatsBatchBusy || seatsResetting || seatsLoading) return;
     setSeatStatus(seat.id, seat.status === "비어있음" ? "사용중" : "비어있음");
   };
 
@@ -131,6 +90,15 @@ export default function OwnerStorePage() {
       {seatsResetting && (
         <div className="mx-6 mt-4 rounded-xl bg-amber-tint px-4 py-3 text-[13px] font-medium text-amber-dark">
           좌석을 초기화하는 중이에요. 서버 응답을 기다리는 동안 잠시만 기다려주세요...
+        </div>
+      )}
+
+      {/* 총 좌석 수 조정(추가/삭제)이 서버와 순서대로 처리되는 중이에요. 이
+          동안 다시 숫자를 바꾸면 아직 처리 중인 이전 변경과 겹쳐 좌석 번호가
+          꼬일 수 있어서, 끝날 때까지 입력을 잠깐 막아요. */}
+      {seatsBatchBusy && (
+        <div className="mx-6 mt-4 rounded-xl bg-amber-tint px-4 py-3 text-[13px] font-medium text-amber-dark">
+          좌석 수를 반영하는 중이에요. 잠시 후 다시 시도해주세요...
         </div>
       )}
 
@@ -169,13 +137,15 @@ export default function OwnerStorePage() {
               type="number"
               min={1}
               value={setupCount}
+              disabled={seatsBatchBusy}
               onChange={(e) => setSetupCount(e.target.value)}
               placeholder="예: 12"
-              className="h-12 flex-1 rounded-xl border border-border bg-white px-4 text-[14.5px] text-ink outline-none focus:border-trust"
+              className="h-12 flex-1 rounded-xl border border-border bg-white px-4 text-[14.5px] text-ink outline-none focus:border-trust disabled:opacity-60"
             />
             <button
               onClick={handleSetup}
-              className="h-12 shrink-0 rounded-xl bg-trust px-5 text-[14.5px] font-bold text-white"
+              disabled={seatsBatchBusy}
+              className="h-12 shrink-0 rounded-xl bg-trust px-5 text-[14.5px] font-bold text-white disabled:opacity-60"
             >
               좌석 만들기
             </button>
@@ -214,7 +184,8 @@ export default function OwnerStorePage() {
               ) : (
                 <button
                   onClick={startEditTotal}
-                  className="rounded-lg px-1.5 py-0.5 text-[20px] font-extrabold text-trust"
+                  disabled={seatsBatchBusy}
+                  className="rounded-lg px-1.5 py-0.5 text-[20px] font-extrabold text-trust disabled:opacity-60"
                 >
                   {total}석
                 </button>
@@ -278,9 +249,10 @@ export default function OwnerStorePage() {
                 key={seat.id}
                 type="button"
                 onClick={() => toggleSeat(seat)}
+                disabled={seatsBatchBusy || seatsResetting || seatsLoading}
                 aria-label={`좌석 ${seat.label} · ${seat.status} · 눌러서 상태 변경`}
                 className={
-                  "flex aspect-square items-center justify-center rounded-2xl text-[22px] font-extrabold text-white shadow-sm transition active:scale-95 " +
+                  "flex aspect-square items-center justify-center rounded-2xl text-[22px] font-extrabold text-white shadow-sm transition active:scale-95 disabled:opacity-50 disabled:active:scale-100 " +
                   (seat.status === "비어있음" ? "bg-sage" : "bg-danger")
                 }
               >

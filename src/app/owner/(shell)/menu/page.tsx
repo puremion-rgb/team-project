@@ -32,7 +32,15 @@ const emptyForm: FormState = {
 };
 
 export default function OwnerMenuPage() {
-  const { menu, addMenuItem, updateMenuItem, removeMenuItem } = useOwner();
+  const {
+    menu,
+    menusLoading,
+    menusLoadFailed,
+    retryMenusLoad,
+    addMenuItem,
+    updateMenuItem,
+    removeMenuItem,
+  } = useOwner();
   const [tab, setTab] = useState<(typeof categories)[number]>("전체");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -112,8 +120,29 @@ export default function OwnerMenuPage() {
         ))}
       </div>
 
+      {/* ⚠️ 메뉴 목록을 서버에서 불러오지 못했을 때(일시적 네트워크 오류 등)
+          "등록된 메뉴가 없어요"만 보여주면 실제로는 메뉴가 있는데 이번에
+          못 불러온 것뿐인데도 없는 것처럼 보였어요. 8초마다 자동으로 다시
+          시도하지만, 바로 다시 시도할 수 있게 버튼도 함께 보여줘요. */}
+      {menusLoadFailed && (
+        <div className="mx-6 mt-4 flex items-center justify-between gap-3 rounded-xl bg-danger-tint px-4 py-3 text-[13px] font-medium text-danger">
+          <span>메뉴 목록을 불러오지 못했어요. 서버 연결을 확인해주세요.</span>
+          <button
+            onClick={retryMenusLoad}
+            className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-[12.5px] font-bold text-danger"
+          >
+            다시 시도
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-col gap-3 px-6 py-6">
-        {filtered.length === 0 && (
+        {filtered.length === 0 && menu.length === 0 && menusLoading && (
+          <p className="mt-10 text-center text-[14px] text-ink-muted">
+            메뉴를 불러오는 중이에요...
+          </p>
+        )}
+        {filtered.length === 0 && !(menu.length === 0 && menusLoading) && (
           <p className="mt-10 text-center text-[14px] text-ink-muted">
             등록된 메뉴가 없어요.
           </p>

@@ -37,6 +37,10 @@ type ReviewsContextValue = {
     /** 이 리뷰가 인증하는 완료된 주문의 id. 있으면 서버에 order_id로 함께
      * 보내서, "실제로 주문한 손님만 리뷰를 남긴다"는 걸 서버도 알 수 있어요. */
     orderId?: string;
+    /** 리뷰를 쓰는 지금 이 순간의 내 프로필 닉네임. 카페 상세 화면이 "방금
+     * 쓴 내 리뷰"를 서버 목록을 기다리는 동안에도 곧바로 실제 이름으로
+     * 보여줄 수 있도록, 매번 새로 계산하지 않고 리뷰에 그대로 저장해둬요. */
+    authorName?: string;
   }) => void;
   updateReview: (
     id: string,
@@ -151,7 +155,7 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
       reviews,
       getReview: (id) => reviews.find((r) => r.id === id),
       getReviewByOrderId: (orderId) => reviews.find((r) => r.orderId === orderId),
-      addReview: ({ cafeId, cafeName, rating, content, images, orderId }) => {
+      addReview: ({ cafeId, cafeName, rating, content, images, orderId, authorName }) => {
         const now = new Date();
         const date = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(
           now.getDate()
@@ -159,7 +163,7 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
         const localId = `r-${Date.now()}`;
         setReviews((prev) =>
           persist([
-            { id: localId, cafeId, cafeName, rating, content, date, images, orderId },
+            { id: localId, cafeId, cafeName, rating, content, date, images, orderId, authorName },
             ...prev,
           ])
         );

@@ -28,6 +28,7 @@ import {
   resolveImageUrl,
   extractReplyContent,
   extractReviewImageUrls,
+  reviewerDisplayName,
   type ApiMenu,
   type ApiReview,
 } from "@/lib/api";
@@ -43,6 +44,10 @@ type DisplayReview = {
   date: string;
   reply: string | null;
   images: string[];
+  // ⚠️ "일반 카페 리뷰도 누가 쓴지 확인이 안 된다"는 문제 대응: 서버 리뷰는
+  // reviewerDisplayName(이름을 못 찾으면 "손님 #123")으로 채우고, 아직 서버
+  // 목록에 안 잡힌 내 로컬 리뷰는 내 프로필 이름(없으면 "나")으로 표시해요.
+  reviewerName: string;
 };
 
 export default function CafeDetailPage({ params }: { params: { id: string } }) {
@@ -51,7 +56,7 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
   // 이 화면(/cafe/[id])은 비로그인 상태로도 볼 수 있어요(auth-store.ts의
   // isPublicPath 참고). 하지만 찜하기/장바구니 담기는 회원만 가능한 행동이라,
   // 비로그인 상태에서 눌렀을 땐 로그인 화면으로 안내해요.
-  const { isLoggedIn } = useAuth();
+  const { isLoggedIn, profile } = useAuth();
   // ⚠️ 예전엔 @/lib/data의 하드코딩된 mock 카페(getCafe)만 참조해서, 지도/검색에서
   // 실제 서버 매장(id가 mock 목록에 없는 숫자 id)을 눌러 들어오면 화면이 늘 같은
   // mock 카페("온기 로스터스")로 대체돼서 보였어요. 이제 useStores()(실제
@@ -140,10 +145,22 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
           localMatch?.images && localMatch.images.length > 0
             ? localMatch.images
             : extractReviewImageUrls(r.images),
+        reviewerName: reviewerDisplayName(r),
       };
     });
 
     // 방금 등록해서 아직 서버 목록에 안 잡힌(=폴링 지연) 내 리뷰만 추가해요.
+    // ⚠️ 예전엔 여기서 무조건 "나"로 표시하다가, 잠시 뒤 서버 목록이 이 리뷰를
+    // 따라잡으면(fromServer로 넘어가면) 그제서야 reviewerDisplayName이 계산해준
+    // 실제 닉네임으로 바뀌었어요. 그 다음엔 로그인한 내 프로필 이름(profile.name)을
+    // 바로 쓰도록 고쳤지만, profile.name 자체가 로그인 직후엔 비어있다가 서버
+    // GET /api/users/me 응답이 오고 나서야(몇 초 걸릴 수 있음) 채워지는
+    // 타이밍이라, 여전히 "나"로 잠깐 보였다가 이름으로 바뀌는 문제가 남아있었어요.
+    // 이제 리뷰를 쓸 때 그 순간의 닉네임을 리뷰 자체(r.authorName)에 저장해두고,
+    // 그 값을 최우선으로 써요 — 그러면 실시간 profile.name이 아직 로딩 중이어도
+    // 처음부터 바로 맞는 이름이 보여요. (이 필드가 없는 옛날 로컬 리뷰만 예전처럼
+    // profile.name → "나" 순서로 대체해요.)
+    const myDisplayName = profile.name.trim().length > 0 ? profile.name : "나";
     const localOnly: DisplayReview[] = myCafeReviews
       .filter((r) => !serverIds.has(r.id))
       .map((r) => ({
@@ -153,10 +170,12 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
         date: r.date,
         reply: null,
         images: r.images ?? [],
+        reviewerName:
+          r.authorName && r.authorName.trim().length > 0 ? r.authorName : myDisplayName,
       }));
 
     return [...fromServer, ...localOnly].sort((a, b) => b.date.localeCompare(a.date));
-  }, [serverReviews, myCafeReviews]);
+  }, [serverReviews, myCafeReviews, profile.name]);
 
   // API 연동이 아직 안 됐거나(개발 초기) 응답을 못 받아온 동안에는 이 기기의
   // 로컬 리뷰 개수로라도 보여줘서 화면이 항상 "0"으로 굳어 보이지 않게 해요.
@@ -496,8 +515,11 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
               {displayReviews.map((r) => (
                 <div key={r.id} className="rounded-2xl border border-border bg-white p-5">
                   <div className="flex items-center gap-2">
-                    <StarRating rating={r.rating} />
+                    <span className="text-[13px] font-bold text-ink">{r.reviewerName}</span>
                     <span className="text-[12.5px] text-ink-muted">{r.date}</span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <StarRating rating={r.rating} />
                   </div>
                   <p className="mt-3 text-[14px] leading-relaxed text-ink-secondary">
                     {r.content}
