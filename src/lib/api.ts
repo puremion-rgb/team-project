@@ -1531,9 +1531,27 @@ function parseOrderItem(raw: Record<string, unknown>): ApiOrderItemDetail {
   };
 }
 
+let warnedMissingOrderUser = false;
+
 function parseOrder(raw: Record<string, unknown>): ApiOrderDetail {
   const store = pick<Record<string, unknown>>(raw, ["store"]);
   const user = pick<Record<string, unknown>>(raw, ["user", "customer", "buyer", "orderer"]);
+
+  // ⚠️ 진단용 로그(개발 중 1번만 출력): "손님 이름/사진이 이제 안 보여요" 문제는
+  // 크게 두 가지 원인이 있어요 — (1) 필드 이름이 우리가 시도하는 후보 목록과
+  // 달라서 user 객체는 있는데 못 찾는 경우, (2) 이 목록 API 응답 자체에
+  // user/customer 관계가 통째로 빠져 있는 경우(=프론트에서 고칠 수 없고 백엔드가
+  // eager-load를 추가해야 함). 아래 로그로 실제 응답에 어떤 최상위 키가 있는지
+  // 콘솔에서 바로 확인해서 둘 중 뭔지 구분할 수 있어요.
+  if (!user && !warnedMissingOrderUser && typeof window !== "undefined") {
+    warnedMissingOrderUser = true;
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[parseOrder] 주문 응답에 user/customer/buyer/orderer 관계가 없어요. " +
+        "이 목록 API가 손님 정보를 아예 안 내려주는 것일 수 있어요. 실제 응답 키:",
+      Object.keys(raw),
+    );
+  }
   const itemsRaw = pick<unknown[]>(raw, ["items", "order_items", "orderItems"]) ?? [];
   const id = Number(pick(raw, ["id"]) ?? 0);
   const storeId = pick<number>(raw, ["store_id"]) ?? (store ? pick<number>(store, ["id"]) : undefined);
@@ -1549,11 +1567,16 @@ function parseOrder(raw: Record<string, unknown>): ApiOrderDetail {
   // ⚠️ 예전의 hint(주문 생성 화면이 저장해둔 캐시) 방식은 "내가 우리 앱 결제
   // 화면으로 직접 주문한 경우"에만 동작해요 — 사장님 화면(다른 브라우저/기기)이나
   // 스웨거로 직접 만든 테스트 주문에는 애초에 hint가 없어서 0원이 그대로
-  // 보였어요(스크린샷의 사장님 화면·주문내역·서버 응답 모두 0원인 이유). 메뉴
-  // 줄 가격은 서버가 항상 정확히 주므로, hint보다 먼저 "메뉴 줄 합계"로
-  // 우선 계산하고, 그마저 없을 때만 hint/서버값 순으로 내려가요.
+  // 보였어요(스크린샷의 사장님 화면·주문내역·서버 응답 모두 0원인 이유). 서버가
+  // final_amount를 안 주는 옛 버전 응답일 때를 대비해, final_amount가 없거나
+  // 0일 때만 "메뉴 줄 합계"로 계산하고, 그마저 없을 때만 hint로 내려가요.
+  // ⚠️ 2026-08-26 실제 서버 응답(GET /api/owner/stores/{store}/orders)으로 확정:
+  // 총액 필드명은 total_amount/amount가 아니라 final_amount(쿠폰 할인까지
+  // 반영된 최종 결제 금액)예요. menu_amount는 할인 반영 전 금액이라 다를 수
+  // 있어요. final_amount를 최우선으로 쓰고, 혹시 없는 버전의 응답이면 기존
+  // 후보(total_amount/amount) → 메뉴 줄 합계 순으로 내려가요.
   const hint = id ? getOrderHint(id) : null;
-  let totalAmount = Number(pick(raw, ["total_amount", "amount"]) ?? 0);
+  let totalAmount = Number(pick(raw, ["final_amount", "total_amount", "amount"]) ?? 0);
   let items = Array.isArray(itemsRaw)
     ? itemsRaw.map((it) => parseOrderItem(it as Record<string, unknown>))
     : [];
@@ -1583,12 +1606,14 @@ function parseOrder(raw: Record<string, unknown>): ApiOrderDetail {
       pick<string>(raw, ["customer_name", "user_name"]) ??
       (user ? pick<string>(user, ["name"]) : undefined) ??
       null,
-    // ⚠️ 주문 목록/상세 응답 스키마가 스웨거에 없어서(성공 200만 명시), 손님
-    // 프로필(ApiUser)과 같은 후보 필드명들(profile_image_url 우선)을 최대한
-    // 넓게 순서대로 시도해요. user/customer 객체 안, 최상위 raw 둘 다 찾아봐요.
-    // ⚠️ 그래도 안 뜨면 필드명이 안 맞아서가 아니라, 이 목록 API 응답 자체에
-    // 손님 관계(user/customer)가 아예 포함 안 돼 있을 가능성이 커요 — 그땐
-    // 실제 응답 JSON을 확인해서 정확한 키로 다시 맞춰야 해요.
+    // ⚠️ 2026-08-26 실제 서버 응답(GET /api/owner/stores/{store}/orders)으로 확정:
+    // user 객체엔 id/name/email/phone만 내려오고 프로필 사진 필드는 전혀
+    // 없어요(profile_image_url도, 다른 어떤 이름의 이미지 필드도 없음). 즉
+    // 필드명을 못 찾아서가 아니라 서버가 이 응답에 사진 데이터 자체를 아예
+    // 안 담아 보내고 있는 거예요 — 프론트 코드로는 고칠 수 없고, 백엔드에서
+    // 이 엔드포인트의 user 관계에 프로필 이미지 필드를 추가해줘야 해결돼요.
+    // 혹시 나중에 백엔드가 필드를 추가해줄 걸 대비해서 아래 후보 이름들은
+    // 그대로 남겨둬요(추가되는 순간 별도 수정 없이 바로 동작하도록).
     customerImageUrl: resolveImageUrl(
       (user
         ? pick<string>(user, [

@@ -35,7 +35,17 @@ export default function ImagePlaceholder({
       <img
         src={src}
         alt={alt}
-        onError={() => setFailed(true)}
+        onError={() => {
+          // ⚠️ 진단용 로그: 이미지가 실패해도 화면엔 항상 똑같은 회색
+          // 플레이스홀더만 보여서 "왜" 안 뜨는지 알 수 없었어요. 실패한
+          // 이미지의 실제 URL을 콘솔에 남겨서(브라우저 개발자도구 > Console),
+          // 서버 주소가 바뀐 뒤에도 옛 주소를 그대로 가리키고 있는지, 주소
+          // 자체(host)가 이상한지, http/https가 안 맞는지(혼합 콘텐츠 차단),
+          // 혹은 서버가 그 경로에서 404를 주는지 등을 바로 확인할 수 있어요.
+          // eslint-disable-next-line no-console
+          console.warn(`[ImagePlaceholder] 이미지 로드 실패: ${src}`);
+          setFailed(true);
+        }}
         className={`bg-[#DDD9CC] object-cover ${rounded} ${className}`}
       />
     );

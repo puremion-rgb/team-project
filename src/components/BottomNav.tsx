@@ -1,13 +1,16 @@
 "use client";
 
-import { Heart, Receipt, MapPin, Ticket, User } from "lucide-react";
+import { Receipt, MapPin } from "lucide-react";
 import ElevatedBottomNav from "@/components/ElevatedBottomNav";
+import WishlistIcon from "@/components/icons/WishlistIcon";
+import CouponIcon from "@/components/icons/CouponIcon";
+import MyIcon from "@/components/icons/MyIcon";
 
 const items = [
-  { href: "/wishlist", label: "찜", icon: Heart },
+  { href: "/wishlist", label: "찜", icon: WishlistIcon },
   { href: "/reserve", label: "주문내역", icon: Receipt },
-  { href: "/benefits", label: "혜택", icon: Ticket },
-  { href: "/my", label: "MY", icon: User },
+  { href: "/benefits", label: "혜택", icon: CouponIcon },
+  { href: "/my", label: "MY", icon: MyIcon },
 ];
 
 const center = {

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { TrendingUp, ChevronRight } from "lucide-react";
+import { TrendingUp, TrendingDown, ChevronRight } from "lucide-react";
 import OwnerTopBar from "@/components/owner/OwnerTopBar";
 import ImagePlaceholder from "@/components/ImagePlaceholder";
 import { useOwner, type SalesPoint } from "@/lib/owner-store";
@@ -84,11 +84,27 @@ export default function OwnerHomePage() {
               >
                 {todaySales.toLocaleString()}원
               </p>
-              <p className="mt-1 flex items-center gap-1 text-[13px] font-bold text-sage-dark">
-                <TrendingUp size={14} strokeWidth={2.5} />
+              <p
+                className={
+                  "mt-1 flex items-center gap-1 text-[13px] font-bold " +
+                  (salesChangePct < 0 ? "text-danger" : "text-sage-dark")
+                }
+              >
+                {salesChangePct < 0 ? (
+                  <TrendingDown size={14} strokeWidth={2.5} />
+                ) : (
+                  <TrendingUp size={14} strokeWidth={2.5} />
+                )}
                 {salesChangePct}% 어제 대비
               </p>
             </div>
+            {/* ⚠️ 이 스파크라인은 "어제 대비 %"와는 다른 지표예요 — 옆 배지는
+                오늘 총매출을 어제 총매출과 비교한 값이고, 이 그래프는
+                todaySalesByHour(오늘 하루 안에서 시간이 지날수록 쌓이는
+                누적 매출)를 그린 거예요. 누적값은 성격상 시간이 지날수록
+                줄어들 수 없어서 우상향 모양으로 보이는 게 정상이고, 그게
+                "어제보다 매출이 늘고 있다"는 뜻은 아니에요. 즉 오늘 매출 데이터만
+                반영되고, 어제 값과는 비교하지 않아요. */}
             <SalesSparkline data={todaySalesByHour} />
           </div>
           {salesError && (

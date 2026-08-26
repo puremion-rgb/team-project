@@ -1,14 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ComponentType } from "react";
 import { usePathname } from "next/navigation";
-import type { LucideIcon } from "lucide-react";
+
+/** Accepts both lucide-react icons and our custom SVG icon components (icons/*.tsx). */
+export type NavIconComponent = ComponentType<{
+  size?: number | string;
+  strokeWidth?: number | string;
+  className?: string;
+}>;
 
 export type NavItem = {
   href: string;
   label: string;
-  icon: LucideIcon;
+  icon: NavIconComponent;
   exact?: boolean;
   /** Static image for a custom center icon (e.g. the map marker animation's still frame). */
   iconSrc?: string;
