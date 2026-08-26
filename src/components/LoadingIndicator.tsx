@@ -4,6 +4,8 @@ type LoadingIndicatorProps = {
   label?: string;
   size?: "sm" | "md" | "lg";
   className?: string;
+  /** Color theme: "brand" (orange, customer-facing) or "trust" (blue, owner-facing). */
+  variant?: "brand" | "trust";
 };
 
 const sizes = {
@@ -12,13 +14,32 @@ const sizes = {
   lg: { outer: "h-20 w-20", dot: "h-3 w-3", inset: 14 },
 } as const;
 
+const variants = {
+  brand: {
+    tintClass: "bg-brand-tint",
+    dotClass: "bg-brand",
+    // Keep this class name fully literal (not built from a template string) so Tailwind's
+    // JIT content scanner can detect and generate it at build time.
+    conicClass:
+      "bg-[conic-gradient(from_0deg,transparent_0deg,rgba(216,90,48,0.04)_80deg,rgba(216,90,48,0.18)_145deg,rgba(216,90,48,0.48)_215deg,#D85A30_345deg,#D85A30_360deg)]",
+  },
+  trust: {
+    tintClass: "bg-trust-tint",
+    dotClass: "bg-trust",
+    conicClass:
+      "bg-[conic-gradient(from_0deg,transparent_0deg,rgba(24,95,165,0.04)_80deg,rgba(24,95,165,0.18)_145deg,rgba(24,95,165,0.48)_215deg,#185FA5_345deg,#185FA5_360deg)]",
+  },
+} as const;
+
 /** Brand-colored loading ring based on the supplied loading icon. */
 export default function LoadingIndicator({
   label = "불러오는 중이에요…",
   size = "md",
   className = "",
+  variant = "brand",
 }: LoadingIndicatorProps) {
   const selected = sizes[size];
+  const color = variants[variant];
   const ringMask: CSSProperties = {
     WebkitMask: `radial-gradient(farthest-side, transparent calc(100% - ${selected.inset}px), #000 calc(100% - ${selected.inset - 1}px))`,
     mask: `radial-gradient(farthest-side, transparent calc(100% - ${selected.inset}px), #000 calc(100% - ${selected.inset - 1}px))`,
@@ -26,12 +47,12 @@ export default function LoadingIndicator({
 
   return (
     <div className={`flex flex-col items-center gap-3 text-ink-muted ${className}`} role="status" aria-live="polite">
-      <div className={`relative ${selected.outer} rounded-full bg-brand-tint`} style={ringMask}>
+      <div className={`relative ${selected.outer} rounded-full ${color.tintClass}`} style={ringMask}>
         <div
-          className="absolute inset-0 animate-spin rounded-full bg-[conic-gradient(from_0deg,transparent_0deg,rgba(216,90,48,0.04)_80deg,rgba(216,90,48,0.18)_145deg,rgba(216,90,48,0.48)_215deg,#D85A30_345deg,#D85A30_360deg)]"
+          className={`absolute inset-0 animate-spin rounded-full ${color.conicClass}`}
           style={ringMask}
         >
-          <span className={`absolute left-1/2 top-0 -translate-x-1/2 rounded-full bg-brand ${selected.dot}`} />
+          <span className={`absolute left-1/2 top-0 -translate-x-1/2 rounded-full ${color.dotClass} ${selected.dot}`} />
         </div>
       </div>
       {label && <p className="text-[14px]">{label}</p>}

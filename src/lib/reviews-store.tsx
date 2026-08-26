@@ -15,6 +15,7 @@ import {
   apiDeleteReview,
   apiGetMyReviews,
   extractReviewImageUrls,
+  extractReplyContent,
   isApiConfigured,
   type MyApiReview,
 } from "@/lib/api";
@@ -100,6 +101,10 @@ function fromApiReview(r: MyApiReview): Review {
     content: r.content,
     date,
     images: extractReviewImageUrls(r.images),
+    // 사장님이 남긴 답글(있으면). 손님쪽 "리뷰 관리"에서도 사장님쪽과 동일하게
+    // 답글이 보이게 하려고 추가했어요 — 손님은 읽기만 하고 수정/삭제는
+    // 사장님쪽(owner)에서만 가능해요.
+    reply: extractReplyContent(r.reply),
     // ⚠️ 서버 리뷰 목록 응답엔 이 리뷰가 어느 주문을 인증으로 썼는지가 안 내려와서
     // orderId는 비워둬요. "이미 리뷰를 남긴 주문인지" 판단은 지금 세션에서 직접
     // 작성한 리뷰(orderId 있음)에 한해서만 동작해요.

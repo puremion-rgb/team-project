@@ -4,8 +4,9 @@ import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, Circle } from "lucide-react";
 import { useOwnerAuth } from "@/lib/owner-auth-store";
+import { getSocialLoginUrl, type SocialProvider } from "@/lib/api";
 
 export default function OwnerSignupPage() {
   const router = useRouter();
@@ -17,6 +18,14 @@ export default function OwnerSignupPage() {
   const [storeName, setStoreName] = useState("");
   const [phone, setPhone] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  // 손님쪽 회원가입 화면과 동일하게, 사장님쪽도 로그인 화면(owner/login)과 같은
+  // 소셜 시작하기 진입점을 회원가입 화면에도 제공해요. 소셜 계정이 처음이면
+  // 백엔드가 계정을 만들고, 기존 계정이면 바로 로그인시켜줘요.
+  const handleSocialSignup = (provider: SocialProvider) => {
+    setError(null);
+    window.location.href = getSocialLoginUrl(provider, "owner");
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -115,14 +124,6 @@ export default function OwnerSignupPage() {
           className="h-14 rounded-2xl border border-border bg-white px-5 text-[15px] placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-trust/30"
         />
 
-        <button
-          type="button"
-          className="mt-6 flex items-center justify-between text-[13.5px] text-ink-secondary"
-        >
-          이용약관 및 개인정보처리방침에 동의합니다.
-          <ChevronRight size={16} className="text-ink-muted" />
-        </button>
-
         {error && <p className="text-[13px] text-danger">{error}</p>}
 
         <div className="mt-4">
@@ -135,6 +136,31 @@ export default function OwnerSignupPage() {
           </button>
         </div>
       </form>
+
+      <div className="my-6 flex items-center gap-3 text-[13px] text-ink-muted">
+        <div className="h-px flex-1 bg-border" />
+        또는
+        <div className="h-px flex-1 bg-border" />
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <button
+          type="button"
+          onClick={() => handleSocialSignup("kakao")}
+          className="flex h-14 items-center justify-center gap-2 rounded-2xl border border-border bg-white text-[15px] font-medium text-ink"
+        >
+          <Circle size={16} className="fill-[#FEE500] text-[#FEE500]" />
+          카카오로 시작하기
+        </button>
+        <button
+          type="button"
+          onClick={() => handleSocialSignup("google")}
+          className="flex h-14 items-center justify-center gap-2 rounded-2xl border border-border bg-white text-[15px] font-medium text-ink"
+        >
+          <span className="font-extrabold text-trust">G</span>
+          구글로 시작하기
+        </button>
+      </div>
 
       <p className="mt-auto pt-10 text-center text-[13px] text-ink-secondary">
         이미 계정이 있으신가요?{" "}

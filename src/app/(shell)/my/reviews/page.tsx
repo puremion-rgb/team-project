@@ -5,7 +5,9 @@ import Link from "next/link";
 import { ChevronRight } from "lucide-react";
 import Header from "@/components/Header";
 import StarRating from "@/components/StarRating";
+import ImagePlaceholder from "@/components/ImagePlaceholder";
 import { useReviews } from "@/lib/reviews-store";
+import { resolveImageUrl } from "@/lib/api";
 
 export default function MyReviewsPage() {
   const { reviews, removeReview } = useReviews();
@@ -40,6 +42,31 @@ export default function MyReviewsPage() {
                 <button onClick={() => setConfirmDeleteId(r.id)}>삭제</button>
               </div>
             </div>
+
+            {/* 사장님쪽 "리뷰 관리"와 동일하게, 내가 올린 사진과 사장님 답글을
+                여기서도 보여줘요. 답글은 사장님만 달 수 있어서 읽기 전용이에요. */}
+            {r.images && r.images.length > 0 && (
+              <div className="mt-3 flex gap-2 overflow-x-auto">
+                {r.images.map((src, i) => (
+                  <ImagePlaceholder
+                    key={`${src}-${i}`}
+                    className="h-16 w-16 shrink-0"
+                    iconSize={14}
+                    src={resolveImageUrl(src)}
+                    alt={`${r.cafeName} 리뷰 사진 ${i + 1}`}
+                  />
+                ))}
+              </div>
+            )}
+
+            {r.reply && (
+              <div className="mt-3 rounded-xl bg-brand-tint/50 p-3">
+                <p className="text-[12.5px] font-bold text-brand-dark">사장님 답글</p>
+                <p className="mt-1 text-[14px] leading-relaxed text-ink-secondary">
+                  {r.reply}
+                </p>
+              </div>
+            )}
           </div>
         ))}
       </div>

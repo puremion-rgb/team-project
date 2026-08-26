@@ -2068,6 +2068,59 @@ export async function apiOwnerUpdateOrderStatus(
   return { ok: false, ...lastError };
 }
 
+/** POST /api/owner/orders/{order}/cancel — 사장님이 주문을 취소할 때 전용으로 써요.
+ * ⚠️ "결제대기"/"준비완료" 주문을 위 apiOwnerUpdateOrderStatus로 취소하려 하면
+ * CANCELLED/CANCELED/REJECTED 후보를 전부 보내도 매번 422("The selected status
+ * is invalid.")로 거절됐어요. 반면 손님쪽 주문 취소(apiCancelMyOrder)는 애초에
+ * status PATCH가 아니라 POST /api/users/me/orders/{id}/cancel이라는 전용
+ * 엔드포인트를 쓰고 있고 실제로 잘 동작해요 — 즉 서버가 "취소"만큼은 status enum
+ * 값이 아니라 별도의 전용 취소 액션으로 받는 걸로 보여요. 사장님쪽에도 그 대칭
+ * 엔드포인트가 있을 걸로 보고 먼저 시도하고, 혹시 아직 없는 서버(404)라면 예전
+ * 방식(PATCH .../status 후보값 재시도)으로 자동 대체해서, 엔드포인트 이름이
+ * 다르더라도 기존에 되던 방식이 계속 동작하게 해요. */
+export async function apiOwnerCancelOrder(
+  orderId: string | number,
+): Promise<{ ok: boolean; httpStatus?: number; message?: string }> {
+  if (!isApiConfigured()) {
+    return { ok: false, message: "백엔드 서버 주소가 설정되어 있지 않아요." };
+  }
+  try {
+    await apiFetch(`/api/owner/orders/${encodeURIComponent(String(orderId))}/cancel`, {
+      method: "POST",
+      authAs: "owner",
+    });
+    return { ok: true };
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) {
+      // 전용 취소 엔드포인트가 아직 없는 서버(라우트 자체가 없음)라면, 예전
+      // 방식(PATCH .../status)으로 대신 시도해요.
+      // ⚠️ 화면에 뜨는 오류 메시지만 봐서는 "전용 취소 API가 아예 없어서
+      // 예전 방식으로 넘어갔다가 그것도 실패한 것"인지, "전용 취소 API
+      // 자체가 다른 이유로 실패한 것"인지 구분이 안 돼서, 개발자 도구 없이도
+      // 알 수 있게 어느 단계에서 실패했는지를 메시지 앞에 표시해요.
+      // eslint-disable-next-line no-console
+      console.error(
+        `[apiOwnerCancelOrder] 주문 #${orderId}: POST .../orders/${orderId}/cancel 라우트가 없어요(404). PATCH .../status 방식으로 대신 시도해요.`,
+      );
+      const fallback = await apiOwnerUpdateOrderStatus(orderId, "CANCELLED");
+      return {
+        ...fallback,
+        message: fallback.message
+          ? `전용 취소 API(POST .../cancel)가 없어 예전 방식으로 시도했지만 실패: ${fallback.message}`
+          : fallback.message,
+      };
+    }
+    if (err instanceof ApiError) {
+      return {
+        ok: false,
+        httpStatus: err.status,
+        message: `취소 API(POST .../cancel) 응답 ${err.status}: ${err.message}`,
+      };
+    }
+    return { ok: false, message: "네트워크 오류로 서버에 연결하지 못했어요." };
+  }
+}
+
 /** POST /api/owner/reviews/{review}/reply
  * ⚠️ 스웨거에 성공 응답 스키마가 없어서(설명만 "성공"), 생성된 답글의 id를
  * 응답에서 알아낼 수 있을지는 서버 구현에 달려있어요. 흔히 쓰는 후보 필드명을

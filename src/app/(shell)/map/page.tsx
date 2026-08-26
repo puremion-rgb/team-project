@@ -94,7 +94,7 @@ export default function MapPage() {
   // 콜백이 오는 걸 이용해요(아래 handleMyLocation 참고).
   const justGeolocatedRef = useRef(false);
 
-  const searchBounds = useCallback((bounds: MapBounds) => {
+  const searchBounds = useCallback((bounds: MapBounds, opts?: { fromButton?: boolean }) => {
     setResearching(true);
     apiGetKakaoCafes({ ...bounds, page: 1, size: 15 })
       .then((res) => {
@@ -104,6 +104,11 @@ export default function MapPage() {
       .finally(() => {
         setResearching(false);
         setInitialSearchDone(true);
+        // 버튼을 눌러서 시작한 검색만 여기서 버튼을 숨겨요(검색이 끝난 뒤).
+        // ⚠️ 예전엔 버튼을 누르는 즉시(아래 handleResearchClick에서) 버튼을
+        // 숨겼는데, 그러면 "검색 중..." 상태를 보여줄 새도 없이 버튼 자체가
+        // 바로 사라져버려서 눌러도 아무 반응이 없는 것처럼 보였어요.
+        if (opts?.fromButton) setShowResearch(false);
       });
   }, []);
 
@@ -144,8 +149,7 @@ export default function MapPage() {
 
   const handleResearchClick = () => {
     if (!pendingBoundsRef.current) return;
-    searchBounds(pendingBoundsRef.current);
-    setShowResearch(false);
+    searchBounds(pendingBoundsRef.current, { fromButton: true });
   };
 
   const handleMyLocation = useCallback((loc: { lat: number; lng: number }) => {
@@ -316,7 +320,13 @@ export default function MapPage() {
           </div>
 
           <div className="pointer-events-auto flex items-center justify-between gap-1">
-            <div className="min-w-0 flex-1 overflow-hidden">
+            {/* ⚠️ 예전엔 이 래퍼에 overflow-hidden이 있었는데, "이 지역에서
+                검색" 버튼(shrink-0)이 오른쪽 자리를 차지하면서 필터 칩 줄
+                너비가 줄어들면 마지막 "혼잡" 칩이 스크롤 안내 없이 딱
+                잘려나가 글자가 깨진 것처럼 보였어요. FilterChips 내부에
+                이미 overflow-x-auto(가로 스크롤)가 있으니 바깥은
+                overflow-visible로 두고, 실제로 옆으로 넘겨볼 수 있게 했어요. */}
+            <div className="min-w-0 flex-1 overflow-visible">
               <FilterChips
                 options={["전체", "여유", "주의", "혼잡"]}
                 value={filter}
@@ -342,6 +352,9 @@ export default function MapPage() {
                   달리 pt-4가 빠져 있어서, 같은 h-9 버튼인데도 두 줄의 세로 위치가
                   서로 어긋나 보였어요. pt-4를 맞춰서 필터 칩과 같은 줄에 나란히
                   놓이게 했어요. */}
+              {/* ⚠️ "이 지역에서 검색"이 너무 길어서 필터 칩과 한 줄에 나란히
+                  있을 때 칩 영역을 심하게 좁혔어요("재검색"으로 줄여서 칩이
+                  잘리지 않게 여유를 더 줬어요). */}
               {view === "map" && showResearch && (
                 <button
                   type="button"
@@ -350,7 +363,7 @@ export default function MapPage() {
                   className="flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-border bg-white px-3.5 text-[13.5px] font-bold text-ink shadow-card disabled:opacity-60"
                 >
                   <RotateCw size={14} className={researching ? "animate-spin" : ""} />
-                  {researching ? "검색 중..." : "이 지역에서 검색"}
+                  {researching ? "검색 중..." : "재검색"}
                 </button>
               )}
             </div>

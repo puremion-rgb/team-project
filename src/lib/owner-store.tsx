@@ -18,6 +18,7 @@ import {
   apiOwnerDeleteMenu,
   apiOwnerListStoreOrders,
   apiOwnerUpdateOrderStatus,
+  apiOwnerCancelOrder,
   type ApiOrderDetail,
   apiOwnerReplyToReview,
   apiOwnerUpdateReviewReply,
@@ -1442,10 +1443,39 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   const rejectOrder = (id: string) => void updateOrderStatus(id, "취소됨", "REJECTED");
   const markOrderReady = (id: string) => void updateOrderStatus(id, "준비완료", "READY");
   const completeOrder = (id: string) => void updateOrderStatus(id, "완료", "COMPLETED");
-  // ⚠️ "결제대기 주문 취소" 화면이 성공 여부를 보고 나서만 이전 화면으로
-  // 돌아갈 수 있도록, 다른 액션들과 달리 void로 던지지 않고 결과를 그대로
-  // 돌려줘요.
-  const cancelOrder = (id: string) => updateOrderStatus(id, "취소됨", "CANCELLED");
+  // ⚠️ 예전엔 이것도 updateOrderStatus(..., "CANCELLED")로 PATCH .../status를
+  // 호출했는데, 서버가 취소는 status enum이 아니라 전용 엔드포인트로 받아서
+  // 매번 "The selected status is invalid."로 거절됐어요(위 apiOwnerCancelOrder
+  // 주석 참고). 낙관적 업데이트/실패 시 되돌리기는 updateOrderStatus와 동일한
+  // 방식으로 여기서 직접 처리해요.
+  const cancelOrder = async (id: string): Promise<{ ok: boolean; message?: string }> => {
+    let prevStatus: OrderState | undefined;
+    ordersRequestIdRef.current++;
+    setOrders((prev) =>
+      prev.map((o) => {
+        if (o.id !== id) return o;
+        prevStatus = o.status;
+        return { ...o, status: "취소됨" };
+      }),
+    );
+    if (!isOwnerLoggedIn) return { ok: true };
+    const result = await apiOwnerCancelOrder(id);
+    ordersRequestIdRef.current++;
+    if (!result.ok) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[cancelOrder] 주문 #${id} 취소를 서버에 저장하지 못했어요(${result.message ?? "사유 불명"}). 화면을 원래 상태로 되돌려요.`,
+      );
+      if (prevStatus) {
+        setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status: prevStatus! } : o)));
+      }
+      return {
+        ok: false,
+        message: result.message ?? "서버에 저장하지 못했어요. 잠시 후 다시 시도해주세요.",
+      };
+    }
+    return { ok: true };
+  };
 
   const addMenuItem = async (
     item: Omit<OwnerMenuItem, "id">
