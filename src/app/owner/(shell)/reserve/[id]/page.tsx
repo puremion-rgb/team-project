@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronLeft, Check, X } from "lucide-react";
 import ImagePlaceholder from "@/components/ImagePlaceholder";
@@ -21,31 +20,8 @@ export default function OwnerOrderDetailPage({
   params: { id: string };
 }) {
   const router = useRouter();
-  const { orders, acceptOrder, rejectOrder, markOrderReady, completeOrder, cancelOrder } =
-    useOwner();
+  const { orders, acceptOrder, rejectOrder, markOrderReady, completeOrder } = useOwner();
   const order = orders.find((o) => o.id === params.id);
-
-  // ⚠️ 예전엔 취소 버튼을 누르자마자 결과를 기다리지 않고 바로 router.back()으로
-  // 이전 화면으로 넘어갔어요. 그래서 서버 저장이 실제로는 실패해도(예: 이
-  // 주문 상태에서는 취소가 허용되지 않는 경우) 사장님은 그 실패 안내를 볼 새도
-  // 없이 화면을 떠났고, 나중에(재로그인 후) 다시 "결제대기"로 보이는 걸 보고
-  // 나서야 취소가 안 됐다는 걸 알게 됐어요. 이제 서버 응답을 기다렸다가,
-  // 성공했을 때만 이전 화면으로 돌아가고, 실패하면 이유를 이 화면에 남겨요.
-  const [cancelling, setCancelling] = useState(false);
-  const [cancelError, setCancelError] = useState<string | null>(null);
-
-  const handleCancelOrder = async () => {
-    if (cancelling || !order) return;
-    setCancelling(true);
-    setCancelError(null);
-    const result = await cancelOrder(order.id);
-    if (result.ok) {
-      router.back();
-      return;
-    }
-    setCancelling(false);
-    setCancelError(result.message ?? "주문 취소에 실패했어요. 잠시 후 다시 시도해주세요.");
-  };
 
   if (!order) {
     return (
@@ -109,26 +85,22 @@ export default function OwnerOrderDetailPage({
         {order.status === "결제대기" && (
           <div className="mt-6">
             <p className="text-center text-[13px] text-ink-muted">
-              손님이 아직 결제를 완료하지 않은 주문이에요. 결제가 끝나면 여기서 접수/거절할 수 있어요.
+              손님이 아직 결제를 완료하지 않은 주문이에요. 결제가 끝나면 여기서
+              접수/거절할 수 있어요.
             </p>
-            {/* ⚠️ 결제 중 오류 등으로 결제가 끝나지 않은 채 남아버린 테스트성
-                주문은, 손님이 다시 결제를 마치지 않는 한 영원히 "결제대기"로
-                남아있었어요. 사장님이 직접 정리할 수 있게 취소 버튼을 둬요. */}
-            {cancelError && (
-              <div className="mt-4 rounded-xl bg-danger-tint px-4 py-3 text-[13px] font-medium text-danger">
-                {cancelError}
-              </div>
-            )}
-            <button
-              onClick={handleCancelOrder}
-              disabled={cancelling}
-              className="mt-4 flex h-12 w-full items-center justify-center gap-1.5 rounded-xl border border-border text-[14px] font-bold text-ink-secondary active:bg-cream disabled:opacity-60"
-            >
-              <X size={16} strokeWidth={2.4} />
-              {cancelling ? "취소 처리 중..." : "결제대기 주문 취소"}
-            </button>
+            {/* ⚠️ 서버 API 문서(Orders & Payments)를 확인해보니, "결제대기" 주문을
+                취소할 수 있는 경로가 손님 쪽(POST /api/users/me/orders/{order}/cancel)
+                에만 있고 사장님 쪽엔 없어요. 사장님 상태변경 API(PATCH
+                /api/owner/orders/{order}/status)는 결제대기 주문에 대해 어떤
+                상태값을 보내도 "The selected status is invalid."로 거절돼요 —
+                즉 서버가 의도적으로 "결제 전 주문은 사장님이 손댈 수 없고,
+                손님만 취소할 수 있다"로 설계돼 있는 것으로 보여요. 그래서 여기
+                취소 버튼은 항상 실패할 수밖에 없어 없앴어요. 손님이 취소하거나
+                결제를 마치면, 이미 돌고 있는 8초 자동 새로고침으로 이 화면도
+                곧 알아서 반영돼요. */}
           </div>
         )}
+
 
         {order.status === "주문접수" && (
           <div className="mt-6 flex gap-2">
@@ -164,33 +136,21 @@ export default function OwnerOrderDetailPage({
           </div>
         )}
 
+        {/* ⚠️ 준비완료 상태에서 "주문취소" 버튼을 누르면 오류가 났던 문제 —
+            준비완료까지 진행된 주문은 취소하는 경우가 실질적으로 없어서, 버튼
+            자체를 없애고 픽업완료 처리만 남겼어요. */}
         {order.status === "준비완료" && (
-          <div className="mt-6 flex flex-col gap-2">
-            {cancelError && (
-              <div className="rounded-xl bg-danger-tint px-4 py-3 text-[13px] font-medium text-danger">
-                {cancelError}
-              </div>
-            )}
-            <div className="flex gap-2">
-            <button
-              onClick={handleCancelOrder}
-              disabled={cancelling}
-              className="flex h-12 flex-1 items-center justify-center gap-1.5 rounded-xl border border-border text-[14px] font-bold text-ink-secondary active:bg-cream disabled:opacity-60"
-            >
-              <X size={16} strokeWidth={2.4} />
-              {cancelling ? "취소 처리 중..." : "주문 취소"}
-            </button>
+          <div className="mt-6">
             <button
               onClick={() => {
                 completeOrder(order.id);
                 router.back();
               }}
-              className="flex h-12 flex-1 items-center justify-center gap-1.5 rounded-xl bg-trust text-[14px] font-bold text-white active:bg-trust-dark"
+              className="flex h-12 w-full items-center justify-center gap-1.5 rounded-xl bg-trust text-[14px] font-bold text-white active:bg-trust-dark"
             >
               <Check size={16} strokeWidth={2.4} />
               픽업완료
             </button>
-            </div>
           </div>
         )}
       </div>

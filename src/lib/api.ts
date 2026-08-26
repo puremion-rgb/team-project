@@ -571,43 +571,192 @@ export async function apiUpdateMe(input: {
   return res.user;
 }
 
+/** apiUploadImage가 마지막으로 실패한 이유(상태 코드/서버 메시지)를 담아둬요.
+ * ⚠️ 예전엔 실패 이유가 console.error로만 남아서, 개발자 도구를 직접 열어보지
+ * 않으면 "왜" 실패했는지(인증 만료? 파일이 너무 큼? 필드명이 다름? 서버가
+ * 아예 꺼져있음?) 화면에서는 전혀 알 수 없었어요. 다른 lastXxxError들과 같은
+ * 패턴으로, 화면(사장님 프로필/메뉴 사진 등)에 실제 이유를 바로 보여줄 수
+ * 있게 여기 남겨둬요. */
+export let lastUploadImageError: string | null = null;
+
+/** 사진이 너무 크면(요즘 스마트폰 사진은 보통 3~8MB) 업로드 전에 브라우저에서
+ * 미리 줄여요(최대 1600px, JPEG 품질 82%). 서버 최대 허용치(5MB, 스웨거 확인)
+ * 안에 넉넉히 들어오게 하기 위한 안전장치예요. */
+async function compressImageForUpload(file: File): Promise<File> {
+  if (typeof window === "undefined") return file;
+  if (!file.type.startsWith("image/")) return file;
+  // 이미 충분히 작은 사진(1.5MB 이하)은 굳이 다시 인코딩할 필요 없어요.
+  const SIZE_THRESHOLD_BYTES = 1.5 * 1024 * 1024;
+  if (file.size <= SIZE_THRESHOLD_BYTES) return file;
+
+  try {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new window.Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("이미지를 읽지 못했어요."));
+      el.src = dataUrl;
+    });
+
+    const MAX_DIMENSION = 1600;
+    let { width, height } = img;
+    if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+      const scale = MAX_DIMENSION / Math.max(width, height);
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return file;
+    ctx.drawImage(img, 0, 0, width, height);
+
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", 0.82),
+    );
+    // 압축했는데도 원본보다 안 줄었으면(드물지만 이미 최적화된 사진 등) 원본을
+    // 그대로 써요 — 괜히 화질만 잃을 수 있으니까요.
+    if (!blob || blob.size >= file.size) return file;
+
+    const newName = file.name.replace(/\.[^./]+$/, "") + ".jpg";
+    return new File([blob], newName, { type: "image/jpeg" });
+  } catch {
+    // 압축 중 뭔가 실패해도(예: 브라우저 호환성) 원본 파일로라도 업로드를
+    // 시도해봐야 하니 조용히 원본을 돌려줘요.
+    return file;
+  }
+}
+
 /** POST /api/uploads/images — 이미지 업로드(프로필 사진 등 공용 업로드).
- * 2026-08-19 백엔드 변경사항 문서로 응답 형식이 확정됐어요:
- *   { "path": "blog/example.jpg", "url": "http://.../storage/blog/example.jpg" }
- * 프론트에서는 이 url을 그대로 쓰면 돼요(이미 절대 주소라 resolveImageUrl도
- * 그대로 통과시켜요). 혹시 모를 다른 응답 형태에 대비해 image_url/path 및
- * data로 감싼 형태도 순서상 후순위로 계속 지원해요. */
+ * 스웨거로 확정된 스펙: multipart/form-data로 "image" 필드(jpg/jpeg/png/webp/gif,
+ * 최대 5MB)를 받고, 성공하면 { "path": "...", "url": "http://.../storage/..." }
+ * 형태로 돌려줘요. 프론트에서는 이 url을 그대로 쓰면 돼요(이미 절대 주소라
+ * resolveImageUrl도 그대로 통과시켜요). 혹시 모를 다른 응답 형태에 대비해
+ * image_url/path 및 data로 감싼 형태도 순서상 후순위로 계속 지원해요.
+ *
+ * ⚠️ 스펙대로 정확히 보내는데도 이 요청이 500(Server Error)으로 실패한다면,
+ * 그건 프론트 코드 문제가 아니라 백엔드 서버 코드가 요청을 처리하다가 예외를
+ * 던지는 거예요(예: 저장소 디스크 설정, storage:link, 파일 권한 등). 그때는
+ * 백엔드 개발자가 서버(Laravel) 로그를 확인해야 해요 — 프론트 쪽에서 더 시도할
+ * 수 있는 게 없어요. */
 export async function apiUploadImage(
   file: File,
   authAs: AuthAs = "customer",
 ): Promise<string | null> {
-  if (!isApiConfigured()) return null;
+  lastUploadImageError = null;
+  if (!isApiConfigured()) {
+    lastUploadImageError =
+      "백엔드 서버 주소(NEXT_PUBLIC_API_BASE_URL)가 설정돼 있지 않아요.";
+    return null;
+  }
+
+  const token =
+    authAs === "customer"
+      ? getCustomerToken()
+      : authAs === "owner"
+        ? getOwnerToken()
+        : null;
+  // ⚠️ authAs가 "owner"인데 사장님 토큰이 없으면(로그인이 만료됐거나 아직
+  // 안 된 상태) 서버가 401을 돌려주는 게 당연한데, 예전엔 이 경우도 그냥
+  // "사진 업로드에 실패했어요"로만 보여서 사장님 재로그인이 필요하다는 걸
+  // 알 방법이 없었어요. 요청을 보내기 전에 먼저 걸러서 바로 알려줘요.
+  if (!token && authAs !== "none") {
+    lastUploadImageError =
+      authAs === "owner"
+        ? "사장님 로그인이 만료됐거나 안 돼 있어요. 다시 로그인해주세요."
+        : "로그인이 만료됐거나 안 돼 있어요. 다시 로그인해주세요.";
+    // eslint-disable-next-line no-console
+    console.error(`[apiUploadImage] ${lastUploadImageError} authAs=${authAs}`);
+    return null;
+  }
+
+  const uploadFile = await compressImageForUpload(file);
+
+  // ⚠️ 스웨거로 확정된 스펙: POST /api/uploads/images는 파일을 정확히 "image"
+  // 필드명으로, multipart/form-data로, 최대 5MB(jpg/jpeg/png/webp/gif)까지
+  // 받아요. 필드명이 "image"가 맞다는 게 문서로도, 서버의 실제 422 응답
+  // ("file"로 보냈을 때 "The image field is required"라고 정확히 "image"를
+  // 지목한 것)으로도 이중으로 확인됐어요. 그래서 예전처럼 필드명을 추측해서
+  // 여러 번 재시도하는 건 더 이상 의미가 없어요(오히려 실패할 요청을 서버에
+  // 한 번 더 보내는 낭비예요) — 스펙대로 "image" 하나로만 보내요.
+  const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+  if (uploadFile.size > MAX_UPLOAD_BYTES) {
+    lastUploadImageError =
+      "사진이 5MB를 넘어요(서버가 허용하는 최대 용량). 더 작은 사진으로 시도해주세요.";
+    return null;
+  }
+
+  const result = await attemptUploadImage(uploadFile, "image", token);
+  if (result.ok) return result.url;
+
+  lastUploadImageError = result.message;
+  // eslint-disable-next-line no-console
+  console.error(
+    `[apiUploadImage] 업로드 실패 authAs=${authAs} token=${token ? "있음" : "없음"}`,
+    result.rawBody,
+  );
+  return null;
+}
+
+type UploadAttemptResult =
+  | { ok: true; url: string }
+  | { ok: false; status: number; message: string; rawBody: string };
+
+async function attemptUploadImage(
+  file: File,
+  fieldName: string,
+  token: string | null,
+): Promise<UploadAttemptResult> {
   try {
     const form = new FormData();
-    form.append("image", file);
+    form.append(fieldName, file);
 
-    const token =
-      authAs === "customer"
-        ? getCustomerToken()
-        : authAs === "owner"
-          ? getOwnerToken()
-          : null;
     const headers: Record<string, string> = { Accept: "application/json" };
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
-    const res = await fetch(`${API_BASE_URL}/api/uploads/images`, {
-      method: "POST",
-      headers,
-      body: form,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(`${API_BASE_URL}/api/uploads/images`, {
+        method: "POST",
+        headers,
+        body: form,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
     if (!res.ok) {
       const bodyText = await res.text().catch(() => "");
-      // eslint-disable-next-line no-console
-      console.error(
-        `[apiUploadImage] 업로드 실패 (${res.status} ${res.statusText}) authAs=${authAs} token=${token ? "있음" : "없음"}`,
-        bodyText,
-      );
-      return null;
+      // 서버가 JSON 에러 메시지를 준다면(Laravel 검증 오류 등) 그 message를
+      // 꺼내서 보여주고, 아니면 상태 코드만이라도 알려줘요.
+      let serverMessage = "";
+      try {
+        const parsed = JSON.parse(bodyText) as Record<string, unknown>;
+        if (typeof parsed["message"] === "string") serverMessage = parsed["message"];
+      } catch {
+        // JSON이 아니면 무시하고 상태 코드만 사용해요.
+      }
+      const message =
+        res.status === 401 || res.status === 403
+          ? "로그인이 만료됐어요. 다시 로그인 후 시도해주세요."
+          : res.status === 413
+            ? "사진 파일이 너무 커요. 더 작은 사진으로 시도해주세요."
+            : res.status === 422
+              ? `사진을 서버가 거부했어요${serverMessage ? `: ${serverMessage}` : "."}`
+              : res.status === 500
+                ? "업로드 서버에 오류가 있어요(500 Server Error). 요청 형식은 스웨거 스펙과 정확히 일치하는데도 서버 코드가 처리 중 죽는 것으로 보여요 — 프론트에서 고칠 수 있는 부분이 아니라 백엔드 개발자가 서버 로그(Laravel log)를 확인해야 해요."
+                : `업로드 요청이 서버에서 거부됐어요 (${res.status})${serverMessage ? `: ${serverMessage}` : "."}`;
+      return { ok: false, status: res.status, message, rawBody: bodyText };
     }
 
     const data = (await res.json().catch(() => null)) as Record<
@@ -615,9 +764,12 @@ export async function apiUploadImage(
       unknown
     > | null;
     if (!data) {
-      // eslint-disable-next-line no-console
-      console.error("[apiUploadImage] 응답 본문을 JSON으로 읽지 못했어요.");
-      return null;
+      return {
+        ok: false,
+        status: res.status,
+        message: "서버 응답을 읽지 못했어요(JSON 형식이 아니에요).",
+        rawBody: "",
+      };
     }
     const nested =
       data["data"] && typeof data["data"] === "object"
@@ -635,13 +787,23 @@ export async function apiUploadImage(
         "[apiUploadImage] 응답에서 이미지 URL 필드를 못 찾았어요. 실제 응답 형태를 확인해주세요:",
         data,
       );
-      return null;
+      return {
+        ok: false,
+        status: res.status,
+        message:
+          "서버 응답에서 이미지 주소를 찾지 못했어요(응답 형식이 바뀌었을 수 있어요).",
+        rawBody: JSON.stringify(data),
+      };
     }
-    return url;
+    return { ok: true, url };
   } catch (err) {
+    const message =
+      err instanceof DOMException && err.name === "AbortError"
+        ? `서버 응답이 ${Math.round(DEFAULT_TIMEOUT_MS / 1000)}초 안에 오지 않았어요. 네트워크나 서버 상태를 확인해주세요.`
+        : "서버에 연결할 수 없어요. 네트워크 상태를 확인해주세요.";
     // eslint-disable-next-line no-console
     console.error("[apiUploadImage] 네트워크 오류로 업로드에 실패했어요:", err);
-    return null;
+    return { ok: false, status: 0, message, rawBody: "" };
   }
 }
 
@@ -1856,6 +2018,8 @@ export type ApiMenu = {
   price: string;
   image_url?: string | null;
   is_available: boolean;
+  /** 재고 수량. null/undefined = 무제한. 서버가 이 필드를 아직 안 내려줄 수도 있어요. */
+  stock?: number | null;
 };
 
 /** GET /api/owner/menus — "사장님 운영정보 재로그인 복원" 문서(섹션 11-3)로 확정된 경로.
@@ -1895,6 +2059,7 @@ export async function apiOwnerCreateMenu(input: {
   description?: string | null;
   image_url?: string | null;
   is_available?: boolean;
+  stock?: number | null;
 }): Promise<ApiMenu | null> {
   if (!isApiConfigured()) return null;
   try {
@@ -1945,6 +2110,7 @@ export async function apiOwnerUpdateMenu(
     description: string | null;
     image_url: string | null;
     is_available: boolean;
+    stock: number | null;
   }>,
 ): Promise<boolean> {
   if (!isApiConfigured()) return false;

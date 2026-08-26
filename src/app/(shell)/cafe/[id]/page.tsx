@@ -273,9 +273,16 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
     // resolveImageUrl이 API 서버 절대주소로 바꿔줘요(없으면 회색 플레이스홀더로
     // 자동 폴백).
     imageUrl: resolveImageUrl(m.image_url),
+    // ⚠️ 사장님이 메뉴 재고를 0으로 설정하면 서버가 is_available: false로
+    // 내려줘요("재고 관련 필드가 메뉴 API엔 없다"는 걸 확인한 뒤, 실제로
+    // 존재·저장되는 이 필드로 품절을 표현해요). 손님 화면에서도 품절인 메뉴는
+    // "재고 없음"으로 보여주고 담기 버튼을 막아요.
+    soldOut: m.is_available === false,
   }));
 
-  const handleAddToCart = (m: { id: string; name: string; price: number }) => {
+  const handleAddToCart = (m: { id: string; name: string; price: number; soldOut?: boolean }) => {
+    // 품절 메뉴는 버튼도 비활성화돼 있지만, 혹시 모를 경우를 대비해 한 번 더 막아요.
+    if (m.soldOut) return;
     // ⚠️ 예전엔 비로그인 상태로 "담기"를 누르면 곧장 /login(로그인 입력 폼)으로
     // 보냈는데, "예약하기"를 누를 때는 다른 화면이 떠요 — /reserve/new는
     // isPublicPath에 없어서 AuthGate가 가로채 "로그인이 필요해요" 안내 화면을
@@ -464,7 +471,10 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
           ) : (
           <div className="flex flex-col gap-4">
             {menuItems.map((m) => (
-              <div key={m.id} className="flex items-center gap-4">
+              <div
+                key={m.id}
+                className={"flex items-center gap-4" + (m.soldOut ? " opacity-50" : "")}
+              >
                 <ImagePlaceholder
                   className="h-14 w-14 shrink-0"
                   rounded="rounded-full"
@@ -477,12 +487,23 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
                   <p className="mt-0.5 text-[14px] font-bold text-ink">
                     {m.price.toLocaleString()}원
                   </p>
+                  {m.soldOut && (
+                    <p className="mt-0.5 text-[12.5px] font-bold text-danger">
+                      재고 없음
+                    </p>
+                  )}
                 </div>
                 <button
                   onClick={() => handleAddToCart(m)}
-                  className="flex h-9 items-center rounded-full border border-brand px-4 text-[13px] font-bold text-brand"
+                  disabled={m.soldOut}
+                  className={
+                    "flex h-9 items-center rounded-full border px-4 text-[13px] font-bold " +
+                    (m.soldOut
+                      ? "border-border text-ink-muted"
+                      : "border-brand text-brand")
+                  }
                 >
-                  담기
+                  {m.soldOut ? "품절" : "담기"}
                 </button>
               </div>
             ))}

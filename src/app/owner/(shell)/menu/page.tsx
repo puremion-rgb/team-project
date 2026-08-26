@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Pencil, Plus, Trash2, X } from "lucide-react";
+import { Pencil, Plus, Trash2, X, AlertTriangle } from "lucide-react";
 import Header from "@/components/Header";
 import ImagePlaceholder from "@/components/ImagePlaceholder";
 import ImageUploadField from "@/components/owner/ImageUploadField";
@@ -11,7 +11,7 @@ import {
   type MenuCategory,
   type OwnerMenuItem,
 } from "@/lib/owner-store";
-import { resolveImageUrl } from "@/lib/api";
+import { apiUploadImage, isApiConfigured, lastUploadImageError, resolveImageUrl } from "@/lib/api";
 
 const categories = ["전체", "커피", "음료", "디저트"] as const;
 
@@ -45,9 +45,19 @@ export default function OwnerMenuPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState<FormState>(emptyForm);
+  // ⚠️ "메뉴 사진" 칸에서 새로 고른 원본 파일이에요. form.imageUrl은 화면에
+  // 바로 보여줄 미리보기(base64)라서, 저장 직전에 이 파일을 실제로
+  // 서버(apiUploadImage)에 업로드해서 진짜 URL로 바꾼 다음 그 URL을 저장해요.
+  // (아래 "새로 추가한 메뉴 사진이 깨져 보이는 문제" 수정 참고)
+  const [imageFile, setImageFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // ⚠️ 예전엔 삭제 버튼을 누르면 확인 절차 없이 곧바로 지워졌어요. 수정
+  // 버튼과 삭제 버튼이 위아래로 붙어있어서, 수정하려다 삭제를 잘못 눌러도
+  // 되돌릴 방법 없이 바로 사라졌어요. 이제 삭제 버튼을 누르면 먼저 확인
+  // 팝업을 띄우고, "삭제하겠습니다"를 눌러야만 실제로 지워져요.
+  const [deleteTarget, setDeleteTarget] = useState<OwnerMenuItem | null>(null);
 
   const filtered =
     tab === "전체" ? menu : menu.filter((m) => m.category === tab);
@@ -61,31 +71,93 @@ export default function OwnerMenuPage() {
       stock: item.stock === null ? "" : String(item.stock),
       imageUrl: item.imageUrl,
     });
+    setImageFile(null);
+    setErrorMsg(null);
   };
 
-  const submitEdit = () => {
+  /** 새로 고른 사진 파일이 있으면 서버에 실제로 업로드해서 진짜 URL을
+   * 받아와요. 없으면(사진을 안 바꿨으면) 폼에 있던 값을 그대로 써요.
+   * ⚠️ 예전엔 이 단계가 아예 없어서, ImageUploadField가 만든 미리보기용
+   * base64 문자열(사진 전체를 텍스트로 인코딩한, 수만 자 넘는 긴 문자열)을
+   * 그대로 메뉴의 image_url로 서버에 저장했어요. 매장 프로필 사진(사장님
+   * 프로필 화면)은 이미 실제 업로드 API로 고쳐져 있었는데 메뉴 사진만
+   * 빠져있었던 거예요. 서버의 image_url 칸은 실제 파일 URL을 담는 자리라
+   * 그렇게 긴 문자열을 넣으면 서버가 잘라서 저장하거나 유효하지 않은
+   * 주소로 취급해서, 나중에 그 값을 다시 불러와 사진을 보여주려 하면 깨진
+   * 이미지 아이콘만 뜨는 거였어요(방금 고른 사진이 이 화면에서 "미리보기"로
+   * 보이는 것과, 그게 실제로 서버에 올바르게 저장되는 것은 서로 다른
+   * 일이었어요). */
+  const resolveImageForSave = async (): Promise<{
+    ok: boolean;
+    imageUrl: string | null;
+  }> => {
+    if (!imageFile || !isApiConfigured()) {
+      return { ok: true, imageUrl: form.imageUrl };
+    }
+    const uploaded = await apiUploadImage(imageFile, "owner");
+    if (!uploaded) return { ok: false, imageUrl: form.imageUrl };
+    return { ok: true, imageUrl: uploaded };
+  };
+  const submitEdit = async () => {
     if (!editingId) return;
-    updateMenuItem(editingId, {
+    setSaving(true);
+    setErrorMsg(null);
+    const { ok: uploadOk, imageUrl } = await resolveImageForSave();
+    if (!uploadOk) {
+      setSaving(false);
+      // ⚠️ 예전엔 "사진 업로드에 실패했어요. 잠시 후 다시 시도해주세요."라는
+      // 뻔한 문구만 보여줘서, 로그인이 만료됐는지/파일이 너무 큰지/서버가
+      // 거부했는지 화면만 봐서는 전혀 알 수 없었고 콘솔을 직접 열어야 했어요.
+      // 이제 apiUploadImage가 실제로 겪은 이유(lastUploadImageError)를 그대로
+      // 보여줘요.
+      setErrorMsg(
+        lastUploadImageError ?? "사진 업로드에 실패했어요. 잠시 후 다시 시도해주세요.",
+      );
+      return;
+    }
+    // ⚠️ 예전엔 updateMenuItem 결과를 확인하지 않고 곧바로 수정 화면을
+    // 닫아버렸어요. 그래서 서버 저장이 실제로 실패해도 화면엔 성공한 것처럼
+    // 잠깐 보였다가, 8초마다 자동으로 메뉴 목록을 새로고침할 때 원래 값으로
+    // 조용히 되돌아갔어요("수정완료를 눌러도 반영이 안 된다"는 문제의 원인).
+    // 이제 결과를 기다렸다가 실패하면 화면을 닫지 않고 에러를 보여줘요.
+    const result = await updateMenuItem(editingId, {
       name: form.name.trim() || "이름 없음",
       price: Number(form.price) || 0,
       category: form.category,
       stock: form.stock.trim() === "" ? null : Number(form.stock),
-      imageUrl: form.imageUrl,
+      imageUrl,
     });
+    setSaving(false);
+    if (!result.ok) {
+      setErrorMsg(result.error ?? "메뉴를 수정하지 못했어요.");
+      return;
+    }
     setEditingId(null);
     setForm(emptyForm);
+    setImageFile(null);
+    setErrorMsg(null);
+    setToast("수정이 완료되었습니다");
+    setTimeout(() => setToast(null), 1800);
   };
 
   const submitAdd = async () => {
     if (!form.name.trim() || saving) return;
     setSaving(true);
     setErrorMsg(null);
+    const { ok: uploadOk, imageUrl } = await resolveImageForSave();
+    if (!uploadOk) {
+      setSaving(false);
+      setErrorMsg(
+        lastUploadImageError ?? "사진 업로드에 실패했어요. 잠시 후 다시 시도해주세요.",
+      );
+      return;
+    }
     const result = await addMenuItem({
       name: form.name.trim(),
       price: Number(form.price) || 0,
       category: form.category,
       stock: form.stock.trim() === "" ? null : Number(form.stock),
-      imageUrl: form.imageUrl,
+      imageUrl,
     });
     setSaving(false);
     if (!result.ok) {
@@ -95,8 +167,15 @@ export default function OwnerMenuPage() {
     }
     setShowAdd(false);
     setForm(emptyForm);
-    setToast(true);
-    setTimeout(() => setToast(false), 1800);
+    setImageFile(null);
+    setToast("메뉴가 추가되었어요");
+    setTimeout(() => setToast(null), 1800);
+  };
+
+  const confirmDelete = () => {
+    if (!deleteTarget) return;
+    removeMenuItem(deleteTarget.id);
+    setDeleteTarget(null);
   };
 
   return (
@@ -168,8 +247,20 @@ export default function OwnerMenuPage() {
                 <p className="mt-0.5 text-[16px] font-bold text-ink">
                   {item.price.toLocaleString()}원
                 </p>
-                <p className="mt-0.5 text-[12.5px] text-ink-muted">
-                  · 재고 {item.stock === null ? "무제한" : `${item.stock}개`}
+                <p
+                  className={
+                    "mt-0.5 text-[12.5px] " +
+                    (item.stock === 0
+                      ? "font-bold text-danger"
+                      : "text-ink-muted")
+                  }
+                >
+                  ·{" "}
+                  {item.stock === null
+                    ? "재고 무제한"
+                    : item.stock === 0
+                      ? "재고 없음 (품절)"
+                      : `재고 ${item.stock}개`}
                 </p>
               </div>
               <div className="flex shrink-0 flex-col gap-2">
@@ -183,7 +274,7 @@ export default function OwnerMenuPage() {
                   <Pencil size={18} strokeWidth={1.8} />
                 </button>
                 <button
-                  onClick={() => removeMenuItem(item.id)}
+                  onClick={() => setDeleteTarget(item)}
                   aria-label="메뉴 삭제"
                   className="flex h-9 w-9 items-center justify-center text-ink-muted"
                 >
@@ -193,13 +284,30 @@ export default function OwnerMenuPage() {
             </div>
 
             {editingId === item.id && (
-              <MenuForm
-                form={form}
-                setForm={setForm}
-                onCancel={() => setEditingId(null)}
-                onSubmit={submitEdit}
-                submitLabel="수정 완료"
-              />
+              <div className="mt-2 rounded-2xl border border-border bg-white p-4">
+                {/* ⚠️ 예전엔 수정 실패 메시지(errorMsg)를 여기서 아예 보여주지
+                    않았어요 — "메뉴 추가하기" 팝업에만 있었어요. 그래서 서버
+                    저장이 실패해도 사용자는 이유를 알 수 없었어요. */}
+                {errorMsg && (
+                  <p className="mb-3 text-[13px] font-medium text-danger">
+                    {errorMsg}
+                  </p>
+                )}
+                <MenuForm
+                  form={form}
+                  setForm={setForm}
+                  onFile={setImageFile}
+                  onCancel={() => {
+                    setEditingId(null);
+                    setImageFile(null);
+                    setErrorMsg(null);
+                  }}
+                  onSubmit={submitEdit}
+                  submitLabel={saving ? "수정하는 중..." : "수정 완료"}
+                  submitDisabled={saving}
+                  embedded
+                />
+              </div>
             )}
           </div>
         ))}
@@ -210,6 +318,7 @@ export default function OwnerMenuPage() {
           onClick={() => {
             setShowAdd(true);
             setForm(emptyForm);
+            setImageFile(null);
             setErrorMsg(null);
           }}
           className="flex h-14 w-full items-center justify-center gap-2 rounded-2xl bg-trust text-[16px] font-bold text-white active:bg-trust-dark"
@@ -238,6 +347,7 @@ export default function OwnerMenuPage() {
             <MenuForm
               form={form}
               setForm={setForm}
+              onFile={setImageFile}
               onCancel={() => setShowAdd(false)}
               onSubmit={submitAdd}
               submitLabel={saving ? "추가하는 중..." : "추가하기"}
@@ -248,7 +358,39 @@ export default function OwnerMenuPage() {
         </div>
       )}
 
-      <Toast show={toast} message="메뉴가 추가되었어요" />
+      {/* ⚠️ 삭제 확인 팝업. "삭제하겠습니다"를 눌러야만 실제 삭제 API가
+          호출돼요 — 실수로 삭제 아이콘을 눌러도 여기서 한 번 더 멈춰서
+          되돌릴 기회를 줘요. */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6">
+            <div className="flex items-center gap-2 text-danger">
+              <AlertTriangle size={20} strokeWidth={2} />
+              <h3 className="text-[16px] font-bold text-ink">메뉴 삭제</h3>
+            </div>
+            <p className="mt-3 text-[14px] text-ink-secondary">
+              <span className="font-bold text-ink">{deleteTarget.name}</span>{" "}
+              메뉴를 삭제할까요? 삭제하면 되돌릴 수 없어요.
+            </p>
+            <div className="mt-5 flex gap-2">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                className="h-12 flex-1 rounded-xl border border-border text-[14.5px] font-bold text-ink-secondary"
+              >
+                취소
+              </button>
+              <button
+                onClick={confirmDelete}
+                className="h-12 flex-1 rounded-xl bg-danger text-[14.5px] font-bold text-white active:opacity-90"
+              >
+                삭제하겠습니다
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <Toast show={toast !== null} message={toast ?? ""} />
     </div>
   );
 }
@@ -256,6 +398,7 @@ export default function OwnerMenuPage() {
 function MenuForm({
   form,
   setForm,
+  onFile,
   onCancel,
   onSubmit,
   submitLabel,
@@ -264,6 +407,7 @@ function MenuForm({
 }: {
   form: FormState;
   setForm: (f: FormState) => void;
+  onFile: (file: File | null) => void;
   onCancel: () => void;
   onSubmit: () => void;
   submitLabel: string;
@@ -276,6 +420,7 @@ function MenuForm({
         <ImageUploadField
           value={form.imageUrl}
           onChange={(v) => setForm({ ...form, imageUrl: v })}
+          onFile={onFile}
           size="h-20 w-20"
         />
       </Field>
@@ -315,9 +460,10 @@ function MenuForm({
           ))}
         </div>
       </Field>
-      <Field label="재고 (비워두면 무제한)">
+      <Field label="재고 (비워두면 무제한, 0을 입력하면 품절 처리돼요)">
         <input
           type="number"
+          min={0}
           value={form.stock}
           onChange={(e) => setForm({ ...form, stock: e.target.value })}
           placeholder="예: 5"
