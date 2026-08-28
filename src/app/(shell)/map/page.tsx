@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { RotateCw, SearchX, Star } from "lucide-react";
@@ -12,6 +12,7 @@ import StatusBadge from "@/components/StatusBadge";
 import ImagePlaceholder from "@/components/ImagePlaceholder";
 import CafeListCard from "@/components/CafeListCard";
 import CustomerTopBar from "@/components/CustomerTopBar";
+import SponsoredCafeCard from "@/components/SponsoredCafeCard";
 import { useWishlist } from "@/lib/wishlist-store";
 import { useStores } from "@/lib/stores-store";
 import { type SeatStatus } from "@/lib/data";
@@ -46,6 +47,37 @@ function formatDistance(m: number | null): string {
   return `${(m / 1000).toFixed(1)}km`;
 }
 
+// ⚠️ 광고 팝업 X버튼: 예전엔 adDismissed가 useState뿐이라서 지도 화면을
+// 벗어났다가 돌아오면(컴포넌트가 새로 마운트되며) 초기화돼 광고가 다시
+// 떴어요. localStorage에 "언제까지 숨길지"(만료 시각, ms)를 저장해두고,
+// 그 시각이 지나기 전까지는 다시 마운트돼도 계속 숨겨진 상태로 시작하게
+// 해요. 체크박스 없이 X만 눌러도 24시간 동안 안 뜨는 방식이라 화면/상태가
+// 늘지 않아서 발표 전 수정 범위를 최소로 유지했어요.
+const AD_DISMISS_STORAGE_KEY = "cafeon_ad_dismissed_until";
+const AD_DISMISS_HOURS = 24;
+
+function readAdDismissedUntil(): number | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(AD_DISMISS_STORAGE_KEY);
+    if (!raw) return null;
+    const until = Number(raw);
+    return Number.isFinite(until) ? until : null;
+  } catch {
+    // 시크릿 모드 등 localStorage를 못 쓰는 환경이면 매번 새로 떠도 그냥 무시해요.
+    return null;
+  }
+}
+
+function writeAdDismissedUntil(until: number) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(AD_DISMISS_STORAGE_KEY, String(until));
+  } catch {
+    // 저장 실패해도 화면 동작에는 지장 없게 조용히 무시해요.
+  }
+}
+
 export default function MapPage() {
   const router = useRouter();
   const [query, setQuery] = useState("");
@@ -53,6 +85,26 @@ export default function MapPage() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>("map");
   const [sortKey, setSortKey] = useState<SortKey>("거리순");
+
+  // ⚠️ 광고(스폰서 카페) 팝업 — 교수님 피드백으로 나온 "카페 사장님이 비용을
+  // 내면 지도에 노출되는 광고" 수익모델 컨셉을 보여주기 위한 프론트 목업이에요.
+  // 실제 광고 신청/결제/서버 연동은 없고, 지금 지도에 있는 카페 중 하나를
+  // "광고"로 보여줘요.
+  // - X만 누르면(체크박스 안 누르고): 지금 보고 있는 이 화면에서는 바로
+  //   닫혀요. localStorage엔 아무것도 저장하지 않아서, 다른 화면 갔다가 지도로
+  //   돌아오면(이 컴포넌트가 새로 마운트되며 adDismissed가 false로 초기화돼)
+  //   광고가 다시 떠요.
+  // - "24시간 안 보기"를 체크하고 X를 누르면: localStorage에 만료 시각을
+  //   저장해서, 24시간 동안은 지도 화면에 새로 들어와도 광고 자체가 안 떠요
+  //   (아래 readAdDismissedUntil/writeAdDismissedUntil 참고).
+  const [adDismissed, setAdDismissed] = useState(false);
+
+  useEffect(() => {
+    const until = readAdDismissedUntil();
+    if (until !== null && until > Date.now()) {
+      setAdDismissed(true);
+    }
+  }, []);
 
   // ⚠️ 예전엔 여기서 @/lib/data의 하드코딩된 mock 카페 배열을 그대로 썼어요.
   // 그래서 지도 배경(카카오맵)은 실제 지도가 뜨는데도, 그 위의 핀은 항상 가짜
@@ -289,6 +341,46 @@ export default function MapPage() {
     return items;
   }, [visibleCafes, visibleKakaoCafes, myLocation, sortKey, cafes]);
 
+  // ⚠️ "현재 내 위치에 있는 카페" 광고 컨셉: 내 위치를 구했으면 그 위치에서
+  // 가장 가까운(=지금 지도에 보이는) CafeOn 등록 카페를, 못 구했으면 그냥 첫
+  // 번째 카페를 광고로 보여줘요. 실제 서비스라면 "광고비를 낸 매장"을
+  // 서버에서 받아와야 하지만, 지금은 프론트 목업이라 이렇게 대체해요.
+  const sponsoredCafe = useMemo(() => {
+    if (visibleCafes.length === 0) return null;
+    if (!myLocation) return visibleCafes[0];
+    let nearest = visibleCafes[0];
+    let nearestDist = distanceMeters(myLocation, { lat: nearest.lat, lng: nearest.lng });
+    for (const c of visibleCafes.slice(1)) {
+      const d = distanceMeters(myLocation, { lat: c.lat, lng: c.lng });
+      if (d < nearestDist) {
+        nearest = c;
+        nearestDist = d;
+      }
+    }
+    return nearest;
+  }, [visibleCafes, myLocation]);
+
+  const sponsoredDistanceLabel = useMemo(() => {
+    if (!sponsoredCafe) return "";
+    if (!myLocation) return "내 주변";
+    return formatDistance(
+      distanceMeters(myLocation, { lat: sponsoredCafe.lat, lng: sponsoredCafe.lng })
+    );
+  }, [sponsoredCafe, myLocation]);
+
+  // X를 누르면 체크박스 여부와 상관없이 지금 화면에서는 바로 닫혀요.
+  // "24시간 안 보기"를 체크했을 때만 localStorage에 만료 시각을 남겨서,
+  // 다음에 지도 화면에 새로 들어와도(컴포넌트가 다시 마운트돼도) 24시간
+  // 동안 계속 숨겨져 있게 해요. 체크 안 했으면 아무것도 저장하지 않으니
+  // 다른 화면 갔다가 지도로 돌아오면 광고가 다시 떠요.
+  const handleCloseAd = useCallback((dontShowForDay: boolean) => {
+    if (dontShowForDay) {
+      writeAdDismissedUntil(Date.now() + AD_DISMISS_HOURS * 60 * 60 * 1000);
+    }
+    setAdDismissed(true);
+  }, []);
+
+
   return (
     // ⚠️ min-h-0이 없으면 이 페이지가 부모(overflow-y-auto인 셸 레이아웃)보다
     // 살짝 더 커질 수 있어서, 지도 화면 전체가 스크롤 가능한 상태가 돼버려요.
@@ -368,6 +460,26 @@ export default function MapPage() {
               )}
             </div>
           </div>
+
+          {/* 광고(스폰서 카페) 팝업. 지도보기에서만, 아직 닫지 않았고 보여줄
+              카페가 있을 때만 떠요. X를 누르면 이 화면을 보는 동안은 다시
+              안 떠요(아래 onClose). */}
+          {view === "map" && sponsoredCafe && !adDismissed && (
+            <div className="pointer-events-auto px-4 pt-2">
+              <SponsoredCafeCard
+                cafe={{
+                  id: sponsoredCafe.id,
+                  name: sponsoredCafe.name,
+                  imageUrl: sponsoredCafe.imageUrl,
+                  rating: sponsoredCafe.rating,
+                  reviewCount: sponsoredCafe.reviewCount,
+                  distanceLabel: sponsoredDistanceLabel,
+                }}
+                onClick={() => router.push(`/cafe/${sponsoredCafe.id}`)}
+                onClose={handleCloseAd}
+              />
+            </div>
+          )}
         </div>
 
         {view === "map" ? (

@@ -69,10 +69,25 @@ function LoginRequiredGate() {
 }
 
 export default function AuthGate({ children }: { children: React.ReactNode }) {
-  const { isLoggedIn } = useAuth();
+  const { isLoggedIn, authReady } = useAuth();
   const pathname = usePathname();
 
-  if (!isLoggedIn && !isPublicPath(pathname)) {
+  // 지도/검색/카페상세처럼 원래 로그인 없이도 보이는 화면은 로그인 확인을
+  // 기다릴 필요 없이 바로 보여줘요(기존 동작 그대로).
+  if (isPublicPath(pathname)) {
+    return <>{children}</>;
+  }
+
+  // ⚠️ 로그인 여부를 아직 확인 중(authReady === false)일 때는 "로그인이
+  // 필요해요" 화면을 보여주지 않아요. 여기서 바로 판단해버리면 실제로는
+  // 로그인된 사용자에게도 그 화면이 잠깐 나타났다 사라지는 깜빡임이
+  // 생겨요(결제 화면 등에서 보고된 문제의 원인). 확인이 끝날 때까지는
+  // 빈 화면으로 잠깐 대기해요.
+  if (!authReady) {
+    return null;
+  }
+
+  if (!isLoggedIn) {
     return <LoginRequiredGate />;
   }
 

@@ -508,8 +508,9 @@ type OwnerContextValue = {
   orders: OwnerOrder[];
   /** 주문을 접수하고 준비를 시작해요("주문접수"에서 "준비중"으로). */
   acceptOrder: (id: string) => void;
-  /** 아직 준비를 시작하지 않은 주문을 거절해요. */
-  rejectOrder: (id: string) => void;
+  /** 아직 준비를 시작하지 않은 주문을 거절해요. 성공/실패와 실패 사유를
+   * 돌려주므로, 호출부는 성공했을 때만 화면을 닫아야 해요. */
+  rejectOrder: (id: string) => Promise<{ ok: boolean; message?: string }>;
   /** 준비가 끝나 손님이 픽업할 수 있는 상태로 바꿔요. */
   markOrderReady: (id: string) => void;
   /** 손님이 픽업을 완료해서 주문을 마무리해요. */
@@ -565,6 +566,9 @@ type OwnerContextValue = {
   salesError: string | null;
   /** 새로고침 버튼 등에서 수동으로 다시 불러오고 싶을 때 사용 */
   refetchSales: () => void;
+  /** 8초 폴링을 기다리지 않고 주문 목록(및 접수 대기 배지 숫자)을 바로 다시
+   * 불러오고 싶을 때 사용 */
+  refetchOrders: () => void;
 };
 
 const OwnerContext = createContext<OwnerContextValue | null>(null);
@@ -637,6 +641,9 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   const [salesLoading, setSalesLoading] = useState(false);
   const [salesError, setSalesError] = useState<string | null>(null);
   const [salesRefreshKey, setSalesRefreshKey] = useState(0);
+  // 주문 거절/취소 성공 직후처럼, 8초 폴링을 기다리지 않고 주문 목록을 바로
+  // 다시 불러오고 싶을 때 이 값을 올려요(아래 주문 목록 useEffect의 deps에 포함).
+  const [ordersRefreshKey, setOrdersRefreshKey] = useState(0);
   // ⚠️ "오늘 매출 숫자가 계속 깜빡거려요" 문제의 원인: 아래 8초 폴링이 돌 때마다
   // salesLoading을 true로 켰다가 꺼서, 값이 안 바뀌어도 숫자 opacity가
   // 100%→50%→100%로 매번 페이드됐어요. 화면(페이지.tsx)의 페이드 효과는 "맨
@@ -851,7 +858,7 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", load);
     };
-  }, [ownerStoreId]);
+  }, [ownerStoreId, ordersRefreshKey]);
 
   // 혼잡도(여유/주의/혼잡)를 서버에서 불러와요.
   // ⚠️ "사장님 화면엔 주의인데 손님 화면엔 여유로 뜬다"는 문제의 원인은 두
@@ -939,6 +946,9 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
     );
 
   const refetchSales = () => setSalesRefreshKey((k) => k + 1);
+  // 새로고침 버튼이나, 주문 거절/취소 성공 직후처럼 8초 폴링을 기다리지 않고
+  // 주문 목록(및 접수 대기 배지 숫자)을 바로 다시 불러오고 싶을 때 사용해요.
+  const refetchOrders = () => setOrdersRefreshKey((k) => k + 1);
 
   const setStore = async (patch: Partial<StoreProfile>): Promise<{ ok: boolean; error?: string }> => {
     setStoreState((prev) => ({ ...prev, ...patch }));
@@ -1511,6 +1521,12 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
         message: result.message ?? "서버에 저장하지 못했어요. 잠시 후 다시 시도해주세요.",
       };
     }
+    // ⚠️ 백엔드에 사장님 전용 취소 API(POST .../orders/{id}/cancel)가 정식
+    // 배포되면서 이제 실제로 성공해요. 성공했으면 8초 폴링을 기다리지 않고
+    // 주문 목록(접수 대기 배지 숫자 포함)과 대시보드 매출을 바로 다시
+    // 불러와서, 취소/거절된 주문이 화면에 곧바로 반영되게 해요.
+    refetchOrders();
+    refetchSales();
     return { ok: true };
   };
 
@@ -1518,13 +1534,18 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
   // rejectOrder도 updateOrderStatus(id, "취소됨", "REJECTED")로 PATCH .../status에
   // CANCELLED/REJECTED/DECLINED 후보를 보냈는데, 바로 위 cancelOrder와 똑같은
   // 이유로 서버가 이 엔드포인트에서는 "취소" 계열 상태값을 전부 422("The
-  // selected status is invalid.")로 거절해요. 그래서 화면은 낙관적으로 먼저
-  // "취소됨"으로 바뀌어 접수 대기 목록에서 잠깐 사라졌다가, 서버 응답이 실패로
-  // 오면 원래 상태("주문접수")로 되돌려져서 다시 나타났던 거예요. "거절"은
-  // 아직 준비를 시작하지 않은 주문을 취소하는 것과 서버 입장에서 같은 동작이라,
-  // 실제로 성공하는 전용 취소 엔드포인트(POST .../orders/{id}/cancel)를 쓰는
-  // cancelOrder를 그대로 재사용해요.
-  const rejectOrder = (id: string) => void cancelOrder(id);
+  // selected status is invalid.")로 거절해요. "거절"은 아직 준비를 시작하지
+  // 않은 주문을 취소하는 것과 서버 입장에서 같은 동작이라, 전용 취소
+  // 엔드포인트(POST .../orders/{id}/cancel)를 쓰는 cancelOrder를 그대로
+  // 재사용해요.
+  // ⚠️ 예전엔 이 함수가 결과를 그냥 버려서(void), 호출부(주문 상세 화면)가
+  // 성공/실패를 전혀 모른 채 항상 곧바로 이전 화면으로 돌아가 버렸어요. 그래서
+  // 거절이 서버에서 실패해도(그 순간엔 조용히 실패) 화면은 이미 넘어가버리고,
+  // 곧이어 낙관적 업데이트가 원래 상태("주문접수")로 되돌려지면서 방금 닫은
+  // 주문 화면이 접수 대기 목록에 다시 나타나 "거절이 안 되고 주문창이 다시
+  // 뜬다"처럼 보였어요. 이제 cancelOrder의 성공/실패 결과를 그대로 돌려줘서,
+  // 호출부가 성공했을 때만 화면을 닫고 실패하면 이유를 보여줄 수 있게 해요.
+  const rejectOrder = (id: string) => cancelOrder(id);
 
   const addMenuItem = async (
     item: Omit<OwnerMenuItem, "id">
@@ -1750,6 +1771,7 @@ export function OwnerProvider({ children }: { children: ReactNode }) {
       salesLoading,
       salesError,
       refetchSales,
+      refetchOrders,
     }),
     [
       store,

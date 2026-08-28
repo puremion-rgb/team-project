@@ -35,6 +35,13 @@ export type OwnerSignupInput = {
 
 type OwnerAuthContextValue = {
   isOwnerLoggedIn: boolean;
+  /** ⚠️ isOwnerLoggedIn은 항상 false로 시작해서(하이드레이션 오류 방지) 마운트
+   * 직후 useEffect에서 실제 저장값으로 바뀌어요. OwnerAuthGate가 그 찰나에
+   * "아직 확인 전"을 "로그인 안 됨"으로 착각하면, 실제로는 로그인된 사장님도
+   * 화면 전환 중 잠깐 로그인 화면으로 튕겨나가는(그리고 곧바로 원래 화면으로
+   * 돌아오는) 깜빡임이 생겨요. ownerAuthReady가 true가 되기 전까지는 리다이렉트
+   * 판단을 미뤄야 해요. */
+  ownerAuthReady: boolean;
   /** 실제 백엔드에 연동된 사장님 매장 ID (연동 전이거나 조회 실패 시 null) */
   ownerStoreId: number | null;
   ownerLogin: (email?: string, password?: string) => Promise<AuthResult>;
@@ -63,12 +70,18 @@ export function OwnerAuthProvider({ children }: { children: ReactNode }) {
   // 서버/클라이언트 첫 렌더는 항상 false/null로 동일하게 시작하고, 마운트된 뒤에만
   // (아래 useEffect) 실제 저장값으로 바꿔요.
   const [isOwnerLoggedIn, setIsOwnerLoggedIn] = useState(false);
+  // ⚠️ "아직 확인 전"과 "확인 결과 비로그인"을 구분하기 위한 플래그예요.
+  // OwnerAuthGate는 이 값이 true가 되기 전까지 로그인 화면으로 리다이렉트하지
+  // 않아요(그전에 판단하면 로그인된 사장님도 화면 전환마다 로그인 화면으로
+  // 잠깐 튕겨나가는 버그가 생겨요).
+  const [ownerAuthReady, setOwnerAuthReady] = useState(false);
   const [ownerStoreId, setOwnerStoreIdState] = useState<number | null>(null);
   const [ownerAuthLoading, setOwnerAuthLoading] = useState(false);
 
   useEffect(() => {
     const hasToken = Boolean(getOwnerToken());
     setIsOwnerLoggedIn(hasToken);
+    setOwnerAuthReady(true);
 
     const cachedStoreId = getOwnerStoreId();
     if (cachedStoreId !== null) {
@@ -200,6 +213,7 @@ export function OwnerAuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<OwnerAuthContextValue>(
     () => ({
       isOwnerLoggedIn,
+      ownerAuthReady,
       ownerStoreId,
       ownerLogin,
       ownerSignup,
@@ -207,7 +221,7 @@ export function OwnerAuthProvider({ children }: { children: ReactNode }) {
       ownerLogout,
       ownerAuthLoading,
     }),
-    [isOwnerLoggedIn, ownerStoreId, ownerAuthLoading]
+    [isOwnerLoggedIn, ownerAuthReady, ownerStoreId, ownerAuthLoading]
   );
 
   return (

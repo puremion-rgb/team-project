@@ -24,6 +24,19 @@ export default function CafeRoutePage({ params }: { params: { id: string } }) {
   // 딥링크의 출발지("내 위치 → 목적지")를 채우는 데는 계속 써요 — 값이 아직
   // 없으면 목적지만 있는 링크로 자연스럽게 대체돼요.
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(null);
+  // ⚠️ 예전엔 위치 확인이 끝나기도 전에(또는 권한 거부로 아예 실패해도) 상단에
+  // 항상 "현재 위치 → 카페명"이라고 확정적으로 표시해서, 실제 위치가 반영 안 된
+  // 채로도 마치 반영된 것처럼 오해할 수 있었어요. 이제 확인 중/성공/실패 3가지
+  // 상태를 구분해서 문구를 다르게 보여줘요.
+  const [locationStatus, setLocationStatus] = useState<"checking" | "success" | "error">(
+    "checking",
+  );
+  const locationLabel =
+    locationStatus === "success"
+      ? "현재 위치"
+      : locationStatus === "error"
+        ? "출발 위치 미확인"
+        : "위치 확인 중";
 
   // ⚠️ 이 화면은 실제 도로를 따라가는 길 안내는 하지 않아요(직선 거리로 도보
   // 시간을 추정만 할 뿐이라 카카오 실제 경로와 값이 안 맞을 수 있어서, 요청에
@@ -73,7 +86,11 @@ export default function CafeRoutePage({ params }: { params: { id: string } }) {
           // 실제 도로를 따라가는 경로가 아니라 건물·도로를 무시하고 가로지르는
           // 직선이라 "진짜 경로처럼 보이지만 실제로는 안 맞는" 오해를 줬어요.
           // 실제 경로는 아래 "실제 경로 보기" 버튼(카카오맵)으로만 보여줘요.
-          onMyLocation={setMyLocation}
+          onMyLocation={(loc) => {
+            setMyLocation(loc);
+            setLocationStatus("success");
+          }}
+          onMyLocationError={() => setLocationStatus("error")}
           showZoomControls
         />
       </div>
@@ -86,8 +103,21 @@ export default function CafeRoutePage({ params }: { params: { id: string } }) {
         >
           <ChevronLeft size={22} />
         </button>
-        <div className="flex h-11 flex-1 items-center rounded-full border-2 border-sage bg-sage-tint px-5 text-[14px] font-bold text-sage-dark shadow-card">
-          <span className="truncate">현재 위치 → {cafe.name}</span>
+        <div
+          className={
+            "flex h-11 flex-1 items-center rounded-full border-2 px-5 text-[14px] font-bold shadow-card " +
+            (locationStatus === "success"
+              ? "border-sage bg-sage-tint text-sage-dark"
+              : locationStatus === "error"
+                ? "border-border bg-white text-ink-muted"
+                : "border-border bg-white text-ink-secondary")
+          }
+        >
+          <span className="truncate">
+            {locationStatus === "error"
+              ? `${locationLabel} · ${cafe.name}`
+              : `${locationLabel} → ${cafe.name}`}
+          </span>
         </div>
       </div>
 

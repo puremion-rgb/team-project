@@ -20,9 +20,14 @@ import { useOwnerAuth } from "@/lib/owner-auth-store";
  *   똑같이 숨겨요 — 이미 로그인돼 있는데 "로그인" 버튼을 또 보여주는 건 혼란스러워요.
  */
 export default function CustomerTopBar() {
-  const { isLoggedIn } = useAuth();
-  const { isOwnerLoggedIn } = useOwnerAuth();
-  const showOwnerLoginButton = !isLoggedIn && !isOwnerLoggedIn;
+  const { isLoggedIn, authReady } = useAuth();
+  const { isOwnerLoggedIn, ownerAuthReady } = useOwnerAuth();
+  // ⚠️ 로그인 여부 확인이 끝나기 전(authReady/ownerAuthReady === false)에는
+  // 항상 "비로그인"으로 취급돼서, 실제로는 로그인된 사용자에게도 이 버튼이
+  // 아주 잠깐 나타났다가 사라지는 깜빡임이 있었어요. 확인이 끝난 뒤에만
+  // 보여주도록 해요.
+  const showOwnerLoginButton =
+    authReady && ownerAuthReady && !isLoggedIn && !isOwnerLoggedIn;
 
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-white px-4">

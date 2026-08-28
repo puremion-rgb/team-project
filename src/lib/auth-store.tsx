@@ -102,6 +102,13 @@ function fromApiUser(apiUser: ApiUser, fallback: CustomerProfile): CustomerProfi
 
 type AuthContextValue = {
   isLoggedIn: boolean;
+  /** ⚠️ isLoggedIn은 항상 false로 시작해서(하이드레이션 오류 방지) 마운트 직후
+   * useEffect에서 실제 저장값으로 바뀌어요. 그 찰나의 순간(authReady === false)에
+   * "아직 확인 전"과 "확인 결과 로그인 안 됨"을 구분하지 못하면, 실제로는 로그인된
+   * 사용자에게도 "로그인이 필요해요" 화면이 잠깐 나타났다 사라지는 깜빡임이
+   * 생겨요(결제 화면 등에서 보고된 문제). AuthGate는 authReady가 true가 되기
+   * 전까지는 로그인 필요 화면을 그리지 않고 기다려야 해요. */
+  authReady: boolean;
   /** 회원가입 때 받은 정보 + 프로필 화면에서 직접 입력한 정보. 로그인 직후에는
    * 아직 서버에서 못 받아온 상태일 수 있어(profileLoading), 화면에서는 이를 참고해서
    * 로딩 표시를 해주면 좋아요. */
@@ -146,6 +153,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // 달라지는 형태로 나타남). 그래서 초기값은 서버와 동일하게 항상 false/빈 값으로 시작하고,
   // 아래 useEffect에서 마운트된 뒤에(=하이드레이션이 끝난 뒤에) 실제 저장값으로 바꿔요.
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  // ⚠️ "아직 확인 전"과 "확인 결과 비로그인"을 구분하기 위한 플래그예요.
+  // 마운트 직후 아래 useEffect가 한 번 돌기 전까지는 false이고, 실제 저장값을
+  // 확인한 뒤 true로 바뀌어요. AuthGate는 이 값이 true가 되기 전까지 로그인
+  // 필요 화면을 보여주지 않아요(그전에 보여주면 실제 로그인 사용자에게도 잠깐
+  // "로그인이 필요해요" 화면이 깜빡이는 버그가 생겨요).
+  const [authReady, setAuthReady] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [profile, setProfile] = useState<CustomerProfile>(EMPTY_PROFILE);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -154,6 +167,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsLoggedIn(Boolean(getCustomerToken()));
     const stored = readProfileStorage();
     if (stored) setProfile(stored);
+    setAuthReady(true);
   }, []);
 
   // 이미 로그인된 상태로 앱이 열렸을 때(새로고침 등) 서버에서 최신 프로필을 받아와요.
@@ -388,6 +402,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthContextValue>(
     () => ({
       isLoggedIn,
+      authReady,
       profile,
       profileLoading,
       login,
@@ -397,7 +412,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authLoading,
       updateProfile,
     }),
-    [isLoggedIn, profile, profileLoading, authLoading]
+    [isLoggedIn, authReady, profile, profileLoading, authLoading]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

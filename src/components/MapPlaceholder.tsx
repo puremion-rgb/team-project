@@ -66,6 +66,7 @@ export default function MapPlaceholder({
   onPinClick,
   onBoundsChanged,
   onMyLocation,
+  onMyLocationError,
   showZoomControls = false,
 }: {
   pins?: MapPin[];
@@ -79,6 +80,10 @@ export default function MapPlaceholder({
   /** 내 실제 위치(위경도)를 가져오는 데 성공하면 한 번 알려줘요. 목록보기의
    * "거리순" 정렬처럼 지도 바깥(부모 화면)에서도 내 위치가 필요한 경우에 써요. */
   onMyLocation?: (loc: { lat: number; lng: number }) => void;
+  /** 위치 권한 거부, 시간 초과, 또는 이 브라우저가 geolocation 자체를 지원하지
+   * 않아서 내 위치를 가져오지 못했을 때 한 번 알려줘요. 부모 화면(길찾기 등)이
+   * "현재 위치"라는 확정 문구 대신 "출발 위치 미확인" 안내를 보여줄 때 써요. */
+  onMyLocationError?: () => void;
   /** 우측 하단에 명시적 확대/축소(+/−) 버튼을 보여줄지 여부. 핀치/스크롤로만
    * 확대축소가 가능해 데스크톱에서 불편하다는 피드백으로 추가했어요. */
   showZoomControls?: boolean;
@@ -109,6 +114,11 @@ export default function MapPlaceholder({
   useEffect(() => {
     onMyLocationRef.current = onMyLocation;
   }, [onMyLocation]);
+
+  const onMyLocationErrorRef = useRef(onMyLocationError);
+  useEffect(() => {
+    onMyLocationErrorRef.current = onMyLocationError;
+  }, [onMyLocationError]);
 
   // 1) SDK 로드 + 지도 최초 생성
   useEffect(() => {
@@ -238,9 +248,13 @@ export default function MapPlaceholder({
           // 핀들의 위치로 지도를 억지로 맞추지 않아요 — mock/시드 데이터가
           // 특정 지역(서울)에 몰려 있으면 사용자의 실제 위치와 무관하게 지도가
           // 그쪽으로 옮겨가 버리는 원인이 되기 때문이에요.
+          onMyLocationErrorRef.current?.();
         },
         { enableHighAccuracy: true, timeout: 5000 }
       );
+    } else {
+      // 이 브라우저가 geolocation 자체를 지원하지 않는 경우예요.
+      onMyLocationErrorRef.current?.();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sdkReady]);

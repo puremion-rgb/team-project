@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronLeft, Check, X } from "lucide-react";
 import ImagePlaceholder from "@/components/ImagePlaceholder";
@@ -22,6 +23,26 @@ export default function OwnerOrderDetailPage({
   const router = useRouter();
   const { orders, acceptOrder, rejectOrder, markOrderReady, completeOrder } = useOwner();
   const order = orders.find((o) => o.id === params.id);
+  // ⚠️ 예전엔 거절 버튼을 누르면 서버 응답을 기다리지 않고 바로
+  // router.back()으로 화면을 닫아버려서, 실패해도 사장님은 알 수 없었고
+  // (원래 상태로 되돌려진 주문이 접수 대기 목록에 다시 나타나는 것만 보임)
+  // "거절이 안 되고 주문창이 다시 뜬다"처럼 느껴졌어요. 이제 서버 응답을
+  // 기다려서, 성공했을 때만 화면을 닫고 실패하면 이유를 여기 보여줘요.
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectError, setRejectError] = useState<string | null>(null);
+
+  const handleReject = async () => {
+    if (!order || rejecting) return;
+    setRejecting(true);
+    setRejectError(null);
+    const result = await rejectOrder(order.id);
+    setRejecting(false);
+    if (result.ok) {
+      router.back();
+    } else {
+      setRejectError(result.message ?? "거절 처리에 실패했어요. 잠시 후 다시 시도해주세요.");
+    }
+  };
 
   if (!order) {
     return (
@@ -103,24 +124,29 @@ export default function OwnerOrderDetailPage({
 
 
         {order.status === "주문접수" && (
-          <div className="mt-6 flex gap-2">
-            <button
-              onClick={() => {
-                rejectOrder(order.id);
-                router.back();
-              }}
-              className="flex h-12 flex-1 items-center justify-center gap-1.5 rounded-xl border border-border text-[14px] font-bold text-ink-secondary active:bg-cream"
-            >
-              <X size={16} strokeWidth={2.4} />
-              거절
-            </button>
-            <button
-              onClick={() => acceptOrder(order.id)}
-              className="flex h-12 flex-1 items-center justify-center gap-1.5 rounded-xl bg-trust text-[14px] font-bold text-white active:bg-trust-dark"
-            >
-              <Check size={16} strokeWidth={2.4} />
-              접수
-            </button>
+          <div className="mt-6">
+            <div className="flex gap-2">
+              <button
+                onClick={handleReject}
+                disabled={rejecting}
+                className="flex h-12 flex-1 items-center justify-center gap-1.5 rounded-xl border border-border text-[14px] font-bold text-ink-secondary active:bg-cream disabled:opacity-60"
+              >
+                <X size={16} strokeWidth={2.4} />
+                {rejecting ? "거절 처리 중..." : "거절"}
+              </button>
+              <button
+                onClick={() => acceptOrder(order.id)}
+                className="flex h-12 flex-1 items-center justify-center gap-1.5 rounded-xl bg-trust text-[14px] font-bold text-white active:bg-trust-dark"
+              >
+                <Check size={16} strokeWidth={2.4} />
+                접수
+              </button>
+            </div>
+            {rejectError && (
+              <p className="mt-2 text-center text-[13px] font-bold text-danger">
+                {rejectError}
+              </p>
+            )}
           </div>
         )}
 
