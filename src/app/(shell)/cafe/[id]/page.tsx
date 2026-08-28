@@ -34,6 +34,21 @@ import {
 } from "@/lib/api";
 import { useCart } from "@/lib/cart-store";
 
+/** is_available 값을 boolean 하나로만 믿지 않고 여러 표현을 인식해요
+ * (백엔드가 boolean 대신 0/1 정수나 "false"/"true" 문자열로 내려주는 경우
+ * 대비). undefined/null(필드 자체가 없음)은 "판매 가능"으로 취급해요 — 서버가
+ * 아직 이 필드를 안 내려주는 매장까지 전부 품절로 잘못 표시하면 안 되니까요. */
+function isMenuSoldOut(isAvailable: unknown): boolean {
+  if (isAvailable === undefined || isAvailable === null) return false;
+  if (typeof isAvailable === "boolean") return isAvailable === false;
+  if (typeof isAvailable === "number") return isAvailable === 0;
+  if (typeof isAvailable === "string") {
+    const v = isAvailable.trim().toLowerCase();
+    return v === "false" || v === "0" || v === "no";
+  }
+  return false;
+}
+
 /** 화면에 보여줄 리뷰 한 건. 서버 리뷰(모든 손님이 씀)와 이 기기에 남아있는
  * 로컬 리뷰(방금 등록해서 아직 서버 목록에 안 잡혔을 수 있는 내 리뷰)를
  * 합쳐서 같은 모양으로 다뤄요. */
@@ -79,7 +94,21 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
     if (!isApiConfigured()) return;
     let cancelled = false;
     apiGetStoreMenus(params.id).then((rows) => {
-      if (!cancelled) setMenu(rows);
+      if (cancelled) return;
+      setMenu(rows);
+      // ⚠️ 진단용 로그: "품절 메뉴가 손님 화면에 아예 안 보인다"는 문제가
+      // 다시 생기면, 원인이 (1) 프론트가 항목을 걸러서 안 보여주는 건지
+      // (2) 서버 응답 자체에 그 항목이 처음부터 없는 건지 구분이 안 되면
+      // 계속 뺑뺑이를 돌 수 있어요. 프론트 코드는 서버가 준 항목을 절대
+      // 거르지 않고 다 그려요 — 그러니 여기 콘솔에 찍힌 배열에 품절 메뉴가
+      // 없다면 100% 서버 응답 자체의 문제예요(브라우저 개발자도구 > Console
+      // 에서 "[CafeDetail] menus from server"로 확인 가능). 있는데도 화면에
+      // 안 보인다면 그건 프론트 렌더링 쪽 문제니 이 로그로 바로 구분돼요.
+      // eslint-disable-next-line no-console
+      console.info(
+        "[CafeDetail] menus from server:",
+        (rows ?? []).map((m) => ({ id: m.id, name: m.name, is_available: m.is_available })),
+      );
     });
     return () => {
       cancelled = true;
@@ -273,9 +302,23 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
     // resolveImageUrl이 API 서버 절대주소로 바꿔줘요(없으면 회색 플레이스홀더로
     // 자동 폴백).
     imageUrl: resolveImageUrl(m.image_url),
+    // ⚠️ 사장님이 메뉴 재고를 0으로 설정하면 서버가 is_available: false로
+    // 내려줘요("재고 관련 필드가 메뉴 API엔 없다"는 걸 확인한 뒤, 실제로
+    // 존재·저장되는 이 필드로 품절을 표현해요). 손님 화면에서도 품절인 메뉴는
+    // "재고 없음"으로 보여주고 담기 버튼을 막아요.
+    // ⚠️ 예전엔 `m.is_available === false`로만 판정해서, 서버가 boolean이
+    // 아니라 0/1이나 "false"/"true" 같은 문자열로 내려주면(백엔드 프레임워크
+    // 캐스팅 방식에 따라 흔히 생기는 차이) 품절 판정 자체가 항상 false로
+    // 새서 "품절인데도 정상 메뉴처럼 보이는" 문제가 생길 수 있었어요. 이제
+    // 여러 표현을 다 인식해요 — 이 목록 자체는 필터링하지 않고(서버가 준
+    // 항목은 품절이어도 항상 다 보여줘요), 오직 품절 여부 판정만 더
+    // 안전하게 만든 거예요.
+    soldOut: isMenuSoldOut(m.is_available),
   }));
 
-  const handleAddToCart = (m: { id: string; name: string; price: number }) => {
+  const handleAddToCart = (m: { id: string; name: string; price: number; soldOut?: boolean }) => {
+    // 품절 메뉴는 버튼도 비활성화돼 있지만, 혹시 모를 경우를 대비해 한 번 더 막아요.
+    if (m.soldOut) return;
     // ⚠️ 예전엔 비로그인 상태로 "담기"를 누르면 곧장 /login(로그인 입력 폼)으로
     // 보냈는데, "예약하기"를 누를 때는 다른 화면이 떠요 — /reserve/new는
     // isPublicPath에 없어서 AuthGate가 가로채 "로그인이 필요해요" 안내 화면을
@@ -464,7 +507,10 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
           ) : (
           <div className="flex flex-col gap-4">
             {menuItems.map((m) => (
-              <div key={m.id} className="flex items-center gap-4">
+              <div
+                key={m.id}
+                className={"flex items-center gap-4" + (m.soldOut ? " opacity-50" : "")}
+              >
                 <ImagePlaceholder
                   className="h-14 w-14 shrink-0"
                   rounded="rounded-full"
@@ -477,12 +523,23 @@ export default function CafeDetailPage({ params }: { params: { id: string } }) {
                   <p className="mt-0.5 text-[14px] font-bold text-ink">
                     {m.price.toLocaleString()}원
                   </p>
+                  {m.soldOut && (
+                    <p className="mt-0.5 text-[12.5px] font-bold text-danger">
+                      재고 없음
+                    </p>
+                  )}
                 </div>
                 <button
                   onClick={() => handleAddToCart(m)}
-                  className="flex h-9 items-center rounded-full border border-brand px-4 text-[13px] font-bold text-brand"
+                  disabled={m.soldOut}
+                  className={
+                    "flex h-9 items-center rounded-full border px-4 text-[13px] font-bold " +
+                    (m.soldOut
+                      ? "border-border text-ink-muted"
+                      : "border-brand text-brand")
+                  }
                 >
-                  담기
+                  {m.soldOut ? "품절" : "담기"}
                 </button>
               </div>
             ))}

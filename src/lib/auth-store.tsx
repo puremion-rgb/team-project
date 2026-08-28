@@ -23,7 +23,9 @@ import {
   type ApiUser,
 } from "@/lib/api";
 
-type AuthResult = { ok: true } | { ok: false; error: string };
+type AuthResult =
+  | { ok: true; warning?: string }
+  | { ok: false; error: string };
 
 /** 화면에 표시/수정하는 손님 프로필. 이메일은 회원가입 때 받은 값을 그대로 쓰고,
  * 이름/전화번호/프로필사진/생년월일은 회원가입 후 프로필 관리 화면에서 직접 입력해 저장해요.
@@ -100,6 +102,13 @@ function fromApiUser(apiUser: ApiUser, fallback: CustomerProfile): CustomerProfi
 
 type AuthContextValue = {
   isLoggedIn: boolean;
+  /** ⚠️ isLoggedIn은 항상 false로 시작해서(하이드레이션 오류 방지) 마운트 직후
+   * useEffect에서 실제 저장값으로 바뀌어요. 그 찰나의 순간(authReady === false)에
+   * "아직 확인 전"과 "확인 결과 로그인 안 됨"을 구분하지 못하면, 실제로는 로그인된
+   * 사용자에게도 "로그인이 필요해요" 화면이 잠깐 나타났다 사라지는 깜빡임이
+   * 생겨요(결제 화면 등에서 보고된 문제). AuthGate는 authReady가 true가 되기
+   * 전까지는 로그인 필요 화면을 그리지 않고 기다려야 해요. */
+  authReady: boolean;
   /** 회원가입 때 받은 정보 + 프로필 화면에서 직접 입력한 정보. 로그인 직후에는
    * 아직 서버에서 못 받아온 상태일 수 있어(profileLoading), 화면에서는 이를 참고해서
    * 로딩 표시를 해주면 좋아요. */
@@ -144,6 +153,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // 달라지는 형태로 나타남). 그래서 초기값은 서버와 동일하게 항상 false/빈 값으로 시작하고,
   // 아래 useEffect에서 마운트된 뒤에(=하이드레이션이 끝난 뒤에) 실제 저장값으로 바꿔요.
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  // ⚠️ "아직 확인 전"과 "확인 결과 비로그인"을 구분하기 위한 플래그예요.
+  // 마운트 직후 아래 useEffect가 한 번 돌기 전까지는 false이고, 실제 저장값을
+  // 확인한 뒤 true로 바뀌어요. AuthGate는 이 값이 true가 되기 전까지 로그인
+  // 필요 화면을 보여주지 않아요(그전에 보여주면 실제 로그인 사용자에게도 잠깐
+  // "로그인이 필요해요" 화면이 깜빡이는 버그가 생겨요).
+  const [authReady, setAuthReady] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [profile, setProfile] = useState<CustomerProfile>(EMPTY_PROFILE);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -152,6 +167,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsLoggedIn(Boolean(getCustomerToken()));
     const stored = readProfileStorage();
     if (stored) setProfile(stored);
+    setAuthReady(true);
   }, []);
 
   // 이미 로그인된 상태로 앱이 열렸을 때(새로고침 등) 서버에서 최신 프로필을 받아와요.
@@ -335,17 +351,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       try {
+        const submittedBirth = normalizeBirthDate(birth ?? null);
         const updated = await apiUpdateMe({
           name,
           phone: phone ?? null,
           profile_image_url: nextImageUrl,
-          birth_date: normalizeBirthDate(birth ?? null),
+          birth_date: submittedBirth,
         });
+        // ⚠️ "저장하기를 눌러도 나중에 다시 들어오면 예전 생년월일로 되돌아가 있는"
+        // 문제의 원인 후보를 확인하기 위해서예요. 이 PUT 응답(updated)은 서버가
+        // 실제로 저장한 값이 아니라 요청을 그대로 되돌려주는 "에코" 응답일 수도
+        // 있어서, 이것만 믿고 화면을 "저장 완료"로 표시하면 실제로는 서버 DB에
+        // 반영되지 않았는데도 성공한 것처럼 보일 수 있어요. 저장 직후 GET
+        // /api/users/me로 한 번 더 실제 값을 확인해서, 방금 보낸 값과 다르면
+        // (=서버가 조용히 무시한 필드가 있으면) 성공 토스트 대신 그 사실을
+        // 화면에 알려줘요. 이건 프론트에서 고칠 수 있는 부분이 아니라 백엔드가
+        // birth_date(또는 다른 필드)를 실제로 저장하도록 고쳐야 하는 문제예요.
+        const confirmed = await apiGetMe("customer");
+        const source = confirmed ?? updated;
         setProfile((prev) => {
-          const next: CustomerProfile = fromApiUser(updated, prev);
+          const next: CustomerProfile = fromApiUser(source, prev);
           writeProfileStorage(next);
           return next;
         });
+        if (confirmed && confirmed.birth_date !== undefined && confirmed.birth_date !== submittedBirth) {
+          return {
+            ok: true,
+            warning:
+              "생년월일이 서버에 저장되지 않았어요(다시 불러오니 예전 값으로 남아있어요). 백엔드에서 birth_date 필드 저장 여부를 확인해주세요.",
+          };
+        }
       } catch (err) {
         // ⚠️ 예전엔 서버 저장이 실패해도 조용히 화면에만 반영하고 "저장 완료"로
         // 보여줬어요. 그러면 화면은 바뀐 것처럼 보이지만 서버엔 저장이 안 돼서,
@@ -367,6 +402,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthContextValue>(
     () => ({
       isLoggedIn,
+      authReady,
       profile,
       profileLoading,
       login,
@@ -376,7 +412,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authLoading,
       updateProfile,
     }),
-    [isLoggedIn, profile, profileLoading, authLoading]
+    [isLoggedIn, authReady, profile, profileLoading, authLoading]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

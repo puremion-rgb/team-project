@@ -36,6 +36,7 @@ export default function ProfileEditPage() {
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
 
   // 서버에서 프로필을 늦게 받아오는 경우(새로고침 직후 등) 폼 값을 채워줘요.
   // 사용자가 이미 입력을 시작한 뒤에는 덮어쓰지 않아요.
@@ -55,6 +56,7 @@ export default function ProfileEditPage() {
 
   const handleSave = async () => {
     setError(null);
+    setWarning(null);
     const result = await updateProfile({
       name: name.trim(),
       phone: phone.trim() || null,
@@ -64,8 +66,20 @@ export default function ProfileEditPage() {
     });
     if (result.ok) {
       setImageFile(null);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1800);
+      // ⚠️ 저장 응답을 다시 확인한 결과(updateProfile 내부에서 저장 직후
+      // GET /api/users/me로 재확인해요) 서버에 실제로 반영되지 않은 값이
+      // 있으면 여기로 warning이 내려와요. "저장되었습니다" 토스트만 띄우면
+      // 실제로는 안 바뀌었는데 바뀐 것처럼 오해할 수 있어서, 그 경우엔
+      // 성공 토스트 대신 어떤 값이 반영 안 됐는지 안내 문구를 보여줘요.
+      // 방금 입력한 값이 실제로 저장되지 않았을 수 있으니, 화면도 서버가
+      // 확인해준 진짜 값(profile.birth 등)으로 다시 맞춰요.
+      if (result.warning) {
+        setWarning(result.warning);
+        setBirth(formatBirthInput(profile.birth ?? ""));
+      } else {
+        setSaved(true);
+        setTimeout(() => setSaved(false), 1800);
+      }
     } else {
       setError(result.error);
     }
@@ -110,6 +124,9 @@ export default function ProfileEditPage() {
       </div>
 
       {error && <p className="mt-3 px-6 text-[13px] text-danger">{error}</p>}
+      {warning && (
+        <p className="mt-3 px-6 text-[13px] text-amber-dark">{warning}</p>
+      )}
 
       <p className="mt-4 px-6 text-[12.5px] text-ink-muted">
         이메일은 회원가입 시 등록한 정보라 여기서는 변경할 수 없어요.
