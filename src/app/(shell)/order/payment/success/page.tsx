@@ -49,8 +49,8 @@ export default function OrderPaymentSuccessPage() {
         setStatus("error");
         return;
       }
-      clearPendingTossPayment();
       const pending = getPendingTossPayment();
+      clearPendingTossPayment();
       cart.setLastOrder({
         orderId,
         cafeName: pending?.cafeName ?? cart.cafeName,
