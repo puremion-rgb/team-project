@@ -5,54 +5,45 @@
 Next.js(App Router) + Tailwind CSS로 구현했고, 카카오맵 SDK · 토스페이먼츠 · `CafeOn Backend API
 v2.0.0`(REST, Sanctum 인증)과 연동합니다.
 
-- **TEAM NextWave**: 오형근(백엔드 · 팀장), 문복기(기획 · 디자인), 김가영(프론트엔드), 이지윤(UI/UX · 프론트엔드)
-
-## 실행 방법
-
-```bash
-npm install
-npm run dev
-```
-
-브라우저에서 http://localhost:3000 접속 → 데스크탑에서도 모바일 비율(max-w-app, 28rem)로 중앙 정렬되어 보입니다.
+- **TEAM NextWave**
 
 ## 화면 목록
 
 ### 손님용
 
-| 경로 | 화면 |
-|---|---|
-| `/` | 스플래시 |
-| `/start` | 계정 선택 (손님/사장님) |
-| `/login`, `/signup` | 손님 로그인 / 회원가입 |
-| `/login/callback` | 소셜 로그인(카카오·구글) 콜백 |
-| `/map` | 지도 (홈, 하단 탭) |
-| `/search` | 카페 검색 |
-| `/cafe/[id]` | 카페 상세 (메뉴/리뷰/사진 탭, 장바구니 담기) |
-| `/cafe/[id]/route` | 길찾기 · 경로 안내 |
-| `/order/cart` | 장바구니 |
-| `/order/checkout` | 주문 · 결제 준비 (토스페이먼츠 결제창 호출) |
-| `/order/payment/success`, `/order/payment/fail` | 토스페이먼츠 결제 리다이렉트 처리 |
-| `/order/complete` | 주문 완료 |
-| `/reserve` | 주문내역 (하단 탭 — 예약이 아니라 주문 상태 목록) |
-| `/wishlist` | 찜한 카페 (하단 탭) |
-| `/benefits` | 혜택 · 포인트 · 쿠폰 (하단 탭, 추후 수정 예정) |
-| `/my` | MY (하단 탭) |
-| `/my/profile` | 프로필 관리 |
-| `/my/reviews`, `/my/reviews/write?cafeId=` | 리뷰 관리 / 작성 |
-| `/my/settings` | 설정 |
-| `/my/support` | 고객센터 |
+| 경로                                            | 화면                                              |
+| ----------------------------------------------- | ------------------------------------------------- |
+| `/`                                             | 스플래시                                          |
+| `/start`                                        | 계정 선택 (손님/사장님)                           |
+| `/login`, `/signup`                             | 손님 로그인 / 회원가입                            |
+| `/login/callback`                               | 소셜 로그인(카카오·구글) 콜백                     |
+| `/map`                                          | 지도 (홈, 하단 탭)                                |
+| `/search`                                       | 카페 검색                                         |
+| `/cafe/[id]`                                    | 카페 상세 (메뉴/리뷰/사진 탭, 장바구니 담기)      |
+| `/cafe/[id]/route`                              | 길찾기 · 경로 안내                                |
+| `/order/cart`                                   | 장바구니                                          |
+| `/order/checkout`                               | 주문 · 결제 준비 (토스페이먼츠 결제창 호출)       |
+| `/order/payment/success`, `/order/payment/fail` | 토스페이먼츠 결제 리다이렉트 처리                 |
+| `/order/complete`                               | 주문 완료                                         |
+| `/reserve`                                      | 주문내역 (하단 탭 — 예약이 아니라 주문 상태 목록) |
+| `/wishlist`                                     | 찜한 카페 (하단 탭)                               |
+| `/benefits`                                     | 혜택 · 포인트 · 쿠폰 (하단 탭, 추후 수정 예정)    |
+| `/my`                                           | MY (하단 탭)                                      |
+| `/my/profile`                                   | 프로필 관리                                       |
+| `/my/reviews`, `/my/reviews/write?cafeId=`      | 리뷰 관리 / 작성                                  |
+| `/my/settings`                                  | 설정                                              |
+| `/my/support`                                   | 고객센터                                          |
 
 ### 사장님용 (`/owner/**`, 작업 중)
 
-| 경로 | 화면 |
-|---|---|
-| `/owner/login`, `/owner/signup` | 사장님 로그인 / 회원가입 |
-| `/owner/(shell)` | 오늘 매출 대시보드 · 그래프 |
-| `/owner/(shell)/store` | 매장 정보 · 좌석 상태 관리 |
-| `/owner/(shell)/menu` | 메뉴 CRUD · 이미지 업로드 |
-| `/owner/(shell)/reserve`, `/owner/(shell)/reserve/[id]` | 주문 접수 · 수락/거절, 상태 동기화 |
-| `/owner/(shell)/my/**` | 사장님 프로필 · 리뷰 답글 · 설정 · 고객센터 |
+| 경로                                                    | 화면                                        |
+| ------------------------------------------------------- | ------------------------------------------- |
+| `/owner/login`, `/owner/signup`                         | 사장님 로그인 / 회원가입                    |
+| `/owner/(shell)`                                        | 오늘 매출 대시보드 · 그래프                 |
+| `/owner/(shell)/store`                                  | 매장 정보 · 좌석 상태 관리                  |
+| `/owner/(shell)/menu`                                   | 메뉴 CRUD · 이미지 업로드                   |
+| `/owner/(shell)/reserve`, `/owner/(shell)/reserve/[id]` | 주문 접수 · 수락/거절, 상태 동기화          |
+| `/owner/(shell)/my/**`                                  | 사장님 프로필 · 리뷰 답글 · 설정 · 고객센터 |
 
 ## 구조
 
@@ -79,7 +70,7 @@ src/
 - 지도 영역은 추후 카카오맵/구글맵 SDK 연동을 염두에 두고 스키매틱 도로 격자 + 상태별 색상 핀으로 임시 표현했습니다(`MapPlaceholder`).
 - 아이콘은 전부 `lucide-react`를 사용했습니다.
 
-## 디자인 토큰 (기본_색상가이드.html 기준)
+## 디자인 토큰 (기본\_색상가이드.html 기준)
 
 `tailwind.config.js`에 등록되어 있습니다.
 
