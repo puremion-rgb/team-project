@@ -4,9 +4,6 @@
 > 지도에서 카페 좌석 혼잡도를 확인하고 그 자리에서 메뉴 주문 · 결제까지 끝내는 **손님용 앱**과,
 > 매장을 관리하는 **사장님용 대시보드**로 구성된 투사이드(two-sided) 서비스입니다.
 
-**🔗 서비스 바로가기** · https://team-project-five-pink.vercel.app/
-**🎨 Figma** · https://www.figma.com/design/gdRgoGaJ1kiDatDeIeVWH5/cafeon?node-id=3-368
-
 <p>
   <img src="./docs/cafeon-splash.webp" width="180" alt="스플래시">
   <img src="./docs/cafeon-map.webp" width="180" alt="지도">
